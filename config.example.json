@@ -1,0 +1,12 @@
+{
+  "repository": "NazzTazz/waar-micro-combat",
+  "checkout": "C:/Users/trist/PhpstormProjects/waar-micro-combat",
+  "allowedAuthors": ["NazzTazz"],
+  "activeLabel": "agent:active",
+  "pollSeconds": 60,
+  "timeoutMinutes": 30,
+  "stateDirectory": "state",
+  "publish": false,
+  "githubAuth": "environment",
+  "codexCommand": ["node", "C:/Users/trist/AppData/Roaming/npm/node_modules/@openai/codex/bin/codex.js"]
+}
