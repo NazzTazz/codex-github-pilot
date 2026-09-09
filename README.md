@@ -69,6 +69,27 @@ Chaque job conserve `task.txt`, `events.jsonl`, `stderr.log`, `result.json`,
 Les fichiers non suivis restent dans la copie Git (ils ne figurent pas dans le
 patch). Les journaux peuvent contenir du code privé : ne pas publier `state/`.
 
+## Télémétrie SQLite
+
+`node src/cli.mjs metrics` affiche les compteurs par tentative ;
+`node src/cli.mjs metrics --json` exporte toutes les colonnes. La table
+`worker_runs` conserve chaque tentative séparément, même après un échec :
+
+- modèle demandé, effort, PID et identifiant de session renvoyé par Codex ;
+- date de mise en file (via `jobs`), début de traitement, début du worker et fin ;
+- préparation, exécution du worker et traitement total en millisecondes ;
+- tokens d'entrée, entrée en cache, écriture de cache, sortie et raisonnement,
+  agrégés depuis les événements `turn.completed` de Codex ;
+- objets `usage` originaux, erreurs JSON du worker, code de sortie et timeout.
+
+Les tokens en cache font partie de l'entrée ; le raisonnement fait partie de la
+sortie. Ne pas additionner ces sous-compteurs une deuxième fois. Un champ absent
+reste `null`, y compris lorsqu'un worker échoue avant de publier son usage.
+Les compteurs sont persistés pendant l'exécution ; les journaux JSONL complets
+restent sur disque. Un crash laisse les durées finales inconnues et conserve
+l'usage déjà reçu. Aucune estimation de facture API n'est déduite de ces compteurs
+d'abonnement. Les anciens jobs sans télémétrie ne sont pas artificiellement remplis.
+
 ## Reprise et limites de la première version
 
 - Un seul worker global, protégé contre deux lancements simultanés. SQLite rend

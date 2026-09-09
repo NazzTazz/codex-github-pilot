@@ -38,7 +38,7 @@ async function main() {
   const args = process.argv.slice(2);
   const command = args[0] || 'help';
   if (command === 'help') {
-    console.log('node src/cli.mjs <doctor|setup|status|poll|run|stop|publish ID|retry ID|cancel ID|resume-quota> [--config path] [--once]\nDefault config: config.local.json. poll only queues; run executes.'); return;
+    console.log('node src/cli.mjs <doctor|setup|status|metrics|poll|run|stop|publish ID|retry ID|cancel ID|resume-quota> [--config path] [--once]\nmetrics --json exports telemetry. Default config: config.local.json. poll only queues; run executes.'); return;
   }
   const configIndex = args.indexOf('--config');
   const config = await loadConfig(path.resolve(configIndex >= 0 ? args[configIndex+1] : path.join(root,'config.local.json')));
@@ -63,6 +63,13 @@ async function main() {
   const stopFile = path.join(config.stateDirectory,'stop.requested');
   if (command === 'stop') { await writeFile(stopFile,new Date().toISOString()); console.log('Stop requested after the current operation.'); return; }
   const store = new Store(path.join(config.stateDirectory,'queue.sqlite'));
+  if(command==='metrics') {
+    const rows=store.metrics();
+    if(args.includes('--json'))console.log(JSON.stringify(rows,null,2));
+    else console.table(rows.map(r=>({run:r.id,job:r.job_id,role:r.role,status:r.run_status,input:r.input_tokens,cached:r.cached_input_tokens,
+      output:r.output_tokens,reasoning:r.reasoning_output_tokens,preparation_ms:r.preparation_ms,worker_ms:r.worker_ms,total_ms:r.total_ms})));
+    store.close();return;
+  }
   if (command === 'status') {
     console.log(`Quota paused: ${store.get('quotaPaused') === 'yes'}`);
     console.table(store.jobs().map(({id,issue,role,status,sha,error})=>({id,issue,role,status,sha,error}))); store.close(); return;

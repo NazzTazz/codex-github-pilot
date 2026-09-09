@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { openSync, writeSync, closeSync } from 'node:fs';
 import path from 'node:path';
 import { roles, active, permitted, parseCommand, promptFor, validateResult } from './core.mjs';
+import { Telemetry } from './telemetry.mjs';
 
 export function agentEnvironment(source = process.env) {
   const env = {...source};
@@ -15,6 +16,7 @@ export async function execute(command, args, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {cwd:options.cwd, env:options.env || process.env,
       windowsHide:true, shell:false, detached:process.platform !== 'win32', stdio:['pipe','pipe','pipe']});
+    if(child.pid)options.onSpawn?.(child.pid);
     let stdout = '', stderr = '', timedOut = false, killFallback;
     const timer = setTimeout(() => {
       timedOut = true;
@@ -68,6 +70,8 @@ export async function runJob(config, store, github, job, baseDirectory, dependen
   const git = dependencies.git || gitCommand;
   const authenticate = dependencies.authenticate || checkAuth;
   const run = dependencies.execute || execute;
+  const jobStart=performance.now();
+  const runId=store.startRun(job.id,roles[job.role].model,roles[job.role].effort);
   try {
     const issue = await github.issue(job.issue);
     const comment = await github.request(`/issues/comments/${job.comment_id}`);
@@ -99,14 +103,22 @@ export async function runJob(config, store, github, job, baseDirectory, dependen
     await writeFile(path.join(directory,'task.txt'),promptFor(job,issue,sha));
     const stdout = openSync(path.join(directory,'events.jsonl'),'w');
     const stderr = openSync(path.join(directory,'stderr.log'),'w');
+    const workerStart=performance.now();
+    store.telemetry(runId,{worker_started_at:new Date().toISOString(),preparation_ms:Math.round(workerStart-jobStart)});
+    const telemetry=new Telemetry(snapshot=>store.telemetry(runId,snapshot));
     let result;
     try {
       result = await run(config.codexCommand[0], codexArgs(config,job,checkout,output,path.join(baseDirectory,'result.schema.json')), {
         cwd:checkout, env:agentEnvironment(), input:promptFor(job,issue,sha),
         timeoutMs:config.timeoutMinutes * 60000,
-        onStdout:data => writeSync(stdout,data), onStderr:data => writeSync(stderr,data)
+        onStdout:data => {writeSync(stdout,data);telemetry.feed(data);}, onStderr:data => writeSync(stderr,data),
+        onSpawn:pid=>store.telemetry(runId,{pid})
       });
-    } finally { closeSync(stdout); closeSync(stderr); }
+    } finally {
+      telemetry.end();
+      store.telemetry(runId,{worker_ms:Math.round(performance.now()-workerStart),exit_code:result?.code ?? null,timed_out:result ? Number(result.timedOut) : null});
+      closeSync(stdout);closeSync(stderr);
+    }
     if (result.timedOut) { store.update(job.id,{status:'interrupted',error:'Timeout; inspect preserved checkout before another request'}); return; }
     if (result.code !== 0) {
       const quota = /usage limit|quota|rate.limit|limit reached|try again at/i.test(result.stderr + result.stdout);
@@ -124,6 +136,9 @@ export async function runJob(config, store, github, job, baseDirectory, dependen
   } catch (error) {
     const current = store.job(job.id);
     store.update(job.id,{status:current.status === 'publishing' ? 'publishing' : 'failed',error:error.message});
+  } finally {
+    const current=store.job(job.id);
+    store.telemetry(runId,{finished_at:new Date().toISOString(),total_ms:Math.round(performance.now()-jobStart),run_status:current.status,run_error:current.error});
   }
 }
 export async function publishJob(config,store,github,job) {

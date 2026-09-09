@@ -8,6 +8,7 @@ import { parseCommand, active, permitted, poll, validateResult } from '../src/co
 import { GitHub } from '../src/github.mjs';
 import { agentEnvironment, codexArgs, execute, publishJob, runJob } from '../src/runner.mjs';
 import { lock } from '../src/cli.mjs';
+import { Telemetry } from '../src/telemetry.mjs';
 
 const config = {repository:'owner/repo',allowedAuthors:['Owner'],activeLabel:'agent:active',codexCommand:['node','codex.js']};
 const issue = {number:1,state:'open',labels:[{name:'agent:active'}],title:'Task',body:'Spec'};
@@ -126,6 +127,8 @@ test('worker lifecycle binds PR SHA and persists structured result with isolated
     git:async args=>{calls.push(args);return args[0]==='rev-parse'?'a'.repeat(40):'';},
     execute:async (cmd,args,options)=>{
       assert.ok(options.input.includes('Check hashes'));
+      options.onSpawn(1234);
+      options.onStdout(Buffer.from(JSON.stringify({type:'turn.completed',usage:{input_tokens:500,cached_input_tokens:400,output_tokens:20,reasoning_output_tokens:5}})+'\n'));
       writeFileSync(args[args.indexOf('--output-last-message')+1],JSON.stringify({verdict:'pass',summary:'Checked independently',findings:[],validation:['Mutation test']}));
       return {code:0,stdout:'',stderr:'',timedOut:false};
     }
@@ -133,6 +136,12 @@ test('worker lifecycle binds PR SHA and persists structured result with isolated
   assert.equal(store.job(job.id).status,'completed');assert.equal(store.job(job.id).sha,'a'.repeat(40));
   assert.ok(calls.some(args=>args[0]==='fetch'&&args.at(-1)==='refs/pull/1/head'));
   assert.ok(store.job(job.id).result.includes('Mutation test'));
+  const metric=store.metrics()[0];
+  assert.equal(metric.input_tokens,500);assert.equal(metric.cached_input_tokens,400);
+  assert.equal(metric.output_tokens,20);assert.equal(metric.reasoning_output_tokens,5);
+  assert.equal(metric.cache_write_input_tokens,null);assert.equal(metric.pid,1234);
+  assert.equal(metric.run_status,'completed');assert.equal(metric.exit_code,0);
+  assert.ok(metric.total_ms>=metric.worker_ms);assert.ok(metric.finished_at);
 });
 test('request modified after queueing is cancelled before authentication or agent launch',async t=>{
   const store=fixture(t);store.enqueue(comment,issue,'sol-review','Original');
@@ -141,4 +150,39 @@ test('request modified after queueing is cancelled before authentication or agen
     authenticate:()=>assert.fail('must not authenticate')
   });
   assert.equal(store.job(job.id).status,'cancelled');
+  assert.equal(store.metrics()[0].input_tokens,null);
+  assert.equal(store.metrics()[0].worker_started_at,null);
+});
+test('telemetry handles split JSONL, UTF-8 and trailing line while preserving raw usage',()=>{
+  const telemetry=new Telemetry();
+  const text=[{type:'thread.started',thread_id:'session-1'},
+    {type:'turn.completed',usage:{input_tokens:100,cached_input_tokens:80,output_tokens:30,reasoning_output_tokens:20,extra:'é'}},
+    {type:'turn.completed',usage:{input_tokens:50,cached_input_tokens:30,output_tokens:10,reasoning_output_tokens:5}}].map(JSON.stringify).join('\n');
+  const bytes=Buffer.from(text);
+  for(let i=0;i<bytes.length;i++)telemetry.feed(bytes.subarray(i,i+1));
+  telemetry.end();
+  const result=telemetry.snapshot();
+  assert.equal(result.input_tokens,150);assert.equal(result.cached_input_tokens,110);
+  assert.equal(result.output_tokens,40);assert.equal(result.reasoning_output_tokens,25);
+  assert.equal(result.cache_write_input_tokens,null);assert.equal(result.session_id,'session-1');
+  assert.equal(JSON.parse(result.usage_json)[0].extra,'é');assert.equal(result.completed_turns,2);
+});
+test('missing or malformed usage never becomes zero and failed-turn data survives',()=>{
+  const telemetry=new Telemetry();
+  telemetry.feed('not json\n'+JSON.stringify({type:'turn.failed',error:{message:'quota'}})+'\n');
+  telemetry.feed(JSON.stringify({type:'turn.completed',usage:{output_tokens:5}})+'\n');
+  telemetry.end();const result=telemetry.snapshot();
+  assert.equal(result.input_tokens,null);assert.equal(result.output_tokens,5);
+  assert.equal(result.malformed_lines,1);assert.equal(JSON.parse(result.errors_json)[0].error.message,'quota');
+});
+test('SQLite retains each attempt and crash recovery leaves unknown durations null',t=>{
+  const store=fixture(t);store.enqueue(comment,issue,'sol-review','Check');
+  const first=store.startRun(1,'gpt-5.6-sol','medium');
+  store.telemetry(first,{run_status:'failed',finished_at:new Date().toISOString(),input_tokens:100});
+  const second=store.startRun(1,'gpt-5.6-sol','medium');
+  store.telemetry(second,{input_tokens:200});store.recover();
+  const rows=store.metrics();assert.equal(rows.length,2);
+  assert.equal(rows[0].input_tokens,100);assert.equal(rows[0].run_status,'failed');
+  assert.equal(rows[1].input_tokens,200);assert.equal(rows[1].run_status,'interrupted');
+  assert.equal(rows[1].finished_at,null);assert.equal(rows[1].worker_ms,null);
 });
