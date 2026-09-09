@@ -38,11 +38,18 @@ async function main() {
   const args = process.argv.slice(2);
   const command = args[0] || 'help';
   if (command === 'help') {
-    console.log('node src/cli.mjs <doctor|status|poll|run|stop|publish ID|retry ID|cancel ID|resume-quota> [--config path] [--once]\nDefault config: config.local.json. poll only queues; run executes.'); return;
+    console.log('node src/cli.mjs <doctor|setup|status|poll|run|stop|publish ID|retry ID|cancel ID|resume-quota> [--config path] [--once]\nDefault config: config.local.json. poll only queues; run executes.'); return;
   }
   const configIndex = args.indexOf('--config');
   const config = await loadConfig(path.resolve(configIndex >= 0 ? args[configIndex+1] : path.join(root,'config.local.json')));
-  const github = new GitHub(config.repository,['doctor','poll','run','publish'].includes(command) ? await githubToken(config) : undefined);
+  const github = new GitHub(config.repository,['doctor','setup','poll','run','publish'].includes(command) ? await githubToken(config) : undefined);
+  if (command === 'setup') {
+    for await (const label of github.pages('/labels')) {
+      if (label.name === config.activeLabel) { console.log('Activation label already exists.'); return; }
+    }
+    await github.request('/labels','POST',{name:config.activeLabel,color:'1d76db',description:'Allow local Codex pilot commands on this thread'});
+    console.log('Activation label created. No issue or PR was activated.'); return;
+  }
   if (command === 'doctor') {
     const version = await execute(config.codexCommand[0],[...config.codexCommand.slice(1),'--version']);
     console.log(version.stdout.trim());

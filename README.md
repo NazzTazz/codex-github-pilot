@@ -22,6 +22,8 @@ de combat ; sa base SQLite contient uniquement l'état de l'orchestration.
    enregistrée par Git Credential Manager. Le secret est demandé au helper sans
    interaction, gardé en mémoire et jamais affiché ou sauvegardé par le pilote.
 4. Exécuter `node src/cli.mjs doctor`.
+   `node src/cli.mjs setup` crée le label d'activation s'il manque (permission
+   Issues en écriture), sans activer d'issue ni lancer d'agent.
 5. Exécuter une fois `node src/cli.mjs poll` pour fixer le début de collecte.
 6. Ajouter le label `agent:active` à une issue ou PR ouverte et poster une commande
    avec un auteur présent dans `allowedAuthors`.
