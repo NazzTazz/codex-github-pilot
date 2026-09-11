@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { openSync, writeSync, closeSync } from 'node:fs';
 import path from 'node:path';
-import { roles, active, permitted, parseCommand, promptFor, validateResult } from './core.mjs';
+import { executionFor, active, permitted, parseCommand, promptFor, validateResult } from './core.mjs';
 import { Telemetry } from './telemetry.mjs';
 
 export function agentEnvironment(source = process.env) {
@@ -59,7 +59,7 @@ export async function githubToken(config) {
   return password; // In memory only, never written to configuration or logs.
 }
 export function codexArgs(config, job, directory, output, schema) {
-  const role = roles[job.role];
+  const role = executionFor(job);
   return [...config.codexCommand.slice(1), '-a', 'never',
     'exec', '--ignore-user-config', '--ephemeral', '--json', '--model', role.model,
     '-c', `model_reasoning_effort="${role.effort}"`, '-c', 'model_provider="openai"',
@@ -71,12 +71,13 @@ export async function runJob(config, store, github, job, baseDirectory, dependen
   const authenticate = dependencies.authenticate || checkAuth;
   const run = dependencies.execute || execute;
   const jobStart=performance.now();
-  const runId=store.startRun(job.id,roles[job.role].model,roles[job.role].effort);
+  const execution=executionFor(job);
+  const runId=store.startRun(job.id,execution.model,execution.effort);
   try {
     const issue = await github.issue(job.issue);
     const comment = await github.request(`/issues/comments/${job.comment_id}`);
     const command = parseCommand(comment.body);
-    if (!active(issue, config) || !permitted(comment, config) || command?.role !== job.role || command?.request !== job.request) {
+    if (!active(issue, config) || !permitted(comment, config) || command?.role !== job.role || command?.request !== job.request || (command?.profile ?? null) !== (job.profile ?? null)) {
       store.update(job.id, {status:'cancelled', error:'Thread paused/closed or request changed'}); return;
     }
     const pr = issue.pull_request ? await github.pr(job.issue) : null;

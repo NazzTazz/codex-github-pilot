@@ -4,10 +4,20 @@ export const roles = Object.freeze({
   'astra-review': {model:'gpt-6-astra', effort:'low', sandbox:'workspace-write', instruction:'Perform a focused independent counter-review of the requested difficult point. Do not edit tracked files. You may install dependencies and write temporary regression checks in this disposable checkout. Distinguish demonstrated defects from uncertainty and product decisions.'}
 });
 
+export const profiles = Object.freeze({
+  'sol-medium': {model:'gpt-5.6-sol', effort:'medium'},
+  'sol-high': {model:'gpt-5.6-sol', effort:'high'},
+  'astra-low': {model:'gpt-6-astra', effort:'low'}
+});
+export function executionFor(job) {
+  if (!Object.hasOwn(roles, job.role)) throw new Error('Invalid role');
+  if (job.profile && !Object.hasOwn(profiles, job.profile)) throw new Error('Invalid model profile');
+  return {...roles[job.role], ...(job.profile ? profiles[job.profile] : {})};
+}
 export function parseCommand(body) {
   if (body?.includes('<!-- codex-pilot:')) return null;
-  const match = /^\/agent (sol-implement|sol-review|astra-review)(?:\r?\n([\s\S]*))?$/.exec((body || '').trim());
-  return match ? {role:match[1], request:(match[2] || '').trim()} : null;
+  const match = /^\/agent (sol-implement|sol-review|astra-review)(?: (sol-medium|sol-high|astra-low))?(?:\r?\n([\s\S]*))?$/.exec((body || '').trim());
+  return match ? {role:match[1], ...(match[2] ? {profile:match[2]} : {}), request:(match[3] || '').trim()} : null;
 }
 export function active(issue, config) {
   return issue.state === 'open' && issue.labels.some(label => (typeof label === 'string' ? label : label.name) === config.activeLabel);
@@ -28,7 +38,7 @@ export async function poll(config, store, github, now = new Date()) {
       if (!Number.isSafeInteger(number) || number < 1) throw new Error('Invalid issue number');
       const issue = await github.issue(number);
       if (active(issue, config)) {
-        store.enqueue(comment, issue, command.role, command.request);
+        store.enqueue(comment, issue, command.role, command.request, command.profile);
         count++;
       }
     }

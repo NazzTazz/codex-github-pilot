@@ -25,6 +25,24 @@ test('only standalone role commands are executable; quoted mentions and bot repo
   assert.deepEqual(parseCommand(comment.body),{role:'sol-review',request:'Check hashes'});
   for(const body of ['Please /agent sol-review','> /agent sol-review','```\n/agent sol-review\n```','/agent sol-review --unsafe','/agent admin','<!-- codex-pilot:1 -->\n/agent sol-review']) assert.equal(parseCommand(body),null);
 });
+test('explicit profile survives queueing and selects implementation effort',async t=>{
+  const store=fixture(t);
+  const selected={...comment,body:'/agent sol-implement sol-high\nImplement spec'};
+  assert.deepEqual(parseCommand(selected.body),{role:'sol-implement',profile:'sol-high',request:'Implement spec'});
+  assert.equal(parseCommand('/agent sol-implement unknown'),null);
+  await poll(config,store,{async *pages(){yield selected;},async issue(){return issue;}});
+  const job=store.claim();
+  assert.equal(job.profile,'sol-high');
+  const args=codexArgs(config,job,'.','out.json','schema.json');
+  assert.equal(args[args.indexOf('--model')+1],'gpt-5.6-sol');
+  assert.ok(args.includes('model_reasoning_effort="high"'));
+  assert.throws(()=>codexArgs(config,{...job,profile:'unknown'},'.','out','schema'),/Invalid model profile/);
+  await runJob(config,store,{issue:async()=>issue,request:async()=>({...selected,body:'/agent sol-implement sol-medium\nImplement spec'})},job,'.',{
+    authenticate:()=>assert.fail('changed profile must not execute')
+  });
+  assert.equal(store.job(job.id).status,'cancelled');
+  assert.equal(store.metrics()[0].reasoning_effort,'high');
+});
 test('requires allowed human author and open active thread',()=>{
   assert.equal(permitted(comment,config),true);
   assert.equal(permitted({...comment,user:{login:'intruder',type:'User'}},config),false);

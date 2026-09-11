@@ -45,7 +45,20 @@ Vérifie la chaîne de provenance plan/résultat et les tests de mutation.
 La spécification normative est docs/mon-issue.md.
 ```
 
-Rôles : `sol-implement` (Sol medium, écriture dans la copie isolée), `sol-review`
+Chaque tâche peut choisir explicitement son profil modèle/effort en première ligne :
+
+```text
+/agent sol-implement sol-high
+Implémente la spécification et vérifie les cas limites.
+```
+
+Profils disponibles pour chacun des rôles : `sol-medium`, `sol-high`, `astra-low`.
+Le profil remplace le modèle et l'effort par défaut, sans changer les consignes du
+rôle. Il est conservé dans la file ; les métriques enregistrent le modèle et
+l'effort demandés. Modifier le profil du commentaire après sa mise en file annule
+le job : poster une nouvelle commande pour demander un autre profil.
+
+Rôles et valeurs par défaut : `sol-implement` (Sol medium, écriture dans la copie isolée), `sol-review`
 (Sol medium), `astra-review` (Astra low). Les trois rôles utilisent le sandbox
 `workspace-write` dans une copie isolée. Les reviewers peuvent installer les
 dépendances et écrire des tests temporaires ; tout changement de fichier suivi
@@ -89,6 +102,74 @@ Les compteurs sont persistés pendant l'exécution ; les journaux JSONL complets
 restent sur disque. Un crash laisse les durées finales inconnues et conserve
 l'usage déjà reçu. Aucune estimation de facture API n'est déduite de ces compteurs
 d'abonnement. Les anciens jobs sans télémétrie ne sont pas artificiellement remplis.
+
+## Observation du quota et des tokens du compte
+
+`node src/cli.mjs observe` collecte un relevé réel via le protocole local
+`codex app-server`, avec l'authentification ChatGPT du même compte Windows.
+Il ne crée ni conversation, ni tour de modèle, ni mission GitHub. Aucun credential
+n'est copié : le processus Codex utilise sa connexion existante.
+
+- `node src/cli.mjs observe --watch --interval 60` répète les lectures, avec
+  60 secondes d'attente après chaque collecte ; les appels ne se chevauchent pas.
+- `./start-observer.ps1` lance cette observation sans fenêtre sous Windows,
+  avec journaux dans `stateDirectory/observation-logs/`.
+- `node src/cli.mjs stop-observe` arrête uniquement l'observateur, après la
+  lecture en cours. Il possède un verrou séparé et fonctionne pendant les jobs
+  longs ou une pause de quota. Aucun démarrage automatique Windows n'est installé.
+- `node src/cli.mjs usage` lit les relevés enregistrés ; `usage --json --limit 100`
+  expose les 100 derniers relevés et leurs variations, du plus ancien au plus récent.
+- `node src/cli.mjs metrics` reste consacré aux tokens des tentatives du pilote.
+
+SQLite conserve les relevés successifs dans `account_observations`, y compris
+les erreurs et succès partiels, avec les heures de collecte distinctes du quota
+et des tokens. `account/rateLimits/read` fournit les enveloppes, fenêtres,
+pourcentages utilisés et dates de réinitialisation. La vue historique simple
+n'est pas additionnée à la vue multi-enveloppes qui la contient déjà.
+`account/usage/read` fournit les tokens cumulés du compte et les totaux journaliers
+lorsqu'ils sont disponibles. Les réponses de ces deux lectures sont conservées
+pour inspection locale ; la réponse d'identité et l'email ne sont pas sauvegardés.
+Une empreinte de compte sépare les comparaisons entre comptes.
+
+Un jour absent ou un champ inconnu reste inconnu. Les totaux journaliers peuvent
+arriver en retard : ils ne sont jamais additionnés d'un relevé à l'autre.
+La variation des tokens cumulés couvre **tout le compte**, pas seulement ce pilote.
+Une baisse du cumul n'est pas transformée en consommation négative. Une variation
+de quota n'est calculée que pour une même enveloppe, durée et date de reset ;
+un changement de fenêtre est signalé séparément. Ces observations ne permettent
+pas de convertir les tokens en pourcentage de quota ou en facture API.
+
+Le booléen `ordinaryUsageAllowed` est conservé tel que renvoyé par le serveur.
+Les pourcentages ou une date de reset dépassée ne déclenchent aucune reprise de
+la file. Les erreurs de collecte ne mettent pas non plus les jobs en pause.
+Le dashboard hébergé reste un prototype fictif ; aucune donnée de compte n'y
+est publiée par l'observateur.
+
+Protocole : [Codex App Server](https://learn.chatgpt.com/docs/app-server),
+vérifié sur le schéma généré par Codex CLI 0.154.0 le 11 septembre 2026.
+
+## Dashboard local
+
+L'interface modulaire se trouve dans [`dashboard/`](dashboard/README.md), au sein
+de ce dépôt. Elle fonctionne avec un serveur Node local, sans infrastructure
+ChatGPT Sites.
+
+```powershell
+npm --prefix dashboard ci
+npm run dashboard:build
+npm run dashboard
+```
+
+Ouvrir http://127.0.0.1:4173/. `./start-dashboard.ps1` lance le serveur sans
+fenêtre ; `node src/cli.mjs stop-dashboard` l'arrête. L'observateur reste un
+processus indépendant : `./start-observer.ps1` pour collecter, `stop-observe`
+pour arrêter la collecte.
+
+La carte **Quota & tokens** lit les relevés locaux toutes les 15 secondes :
+enveloppes, fenêtres, pourcentages restants, reset, tokens cumulés et jours
+disponibles. Elle indique les erreurs et les relevés de plus de trois minutes.
+Les autres vues utilisent encore les exemples du prototype, explicitement
+identifiés. Aucune donnée réelle n'est envoyée à l'ancien site hébergé.
 
 ## Reprise et limites de la première version
 

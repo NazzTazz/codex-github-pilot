@@ -4,5 +4,6 @@
   "private": true,
   "type": "module",
   "engines": { "node": ">=24.0.0" },
-  "scripts": { "test": "node --test", "start": "node src/cli.mjs run", "doctor": "node src/cli.mjs doctor" }
+  "scripts": { "test": "node --test", "start": "node src/cli.mjs run", "doctor": "node src/cli.mjs doctor",
+    "dashboard": "node src/cli.mjs dashboard", "dashboard:build": "npm --prefix dashboard run build" }
 }
