@@ -1,3 +1,11 @@
+export class GitHubHttpError extends Error {
+  constructor(status,retryAfter) {
+    super(`GitHub HTTP ${status}; retry-after=${retryAfter || 'unspecified'}`);
+    this.name='GitHubHttpError';
+    this.status=status;
+  }
+}
+
 export class GitHub {
   constructor(repository, token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN, transport = fetch) {
     if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error('Invalid repository');
@@ -15,7 +23,7 @@ export class GitHub {
       method, headers, body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(30000), redirect: 'error'
     });
-    if (!response.ok) throw new Error(`GitHub HTTP ${response.status}; retry-after=${response.headers.get('retry-after') || 'unspecified'}`);
+    if (!response.ok) throw new GitHubHttpError(response.status,response.headers.get('retry-after'));
     return response.json();
   }
   async *pages(path) {

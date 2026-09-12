@@ -53,7 +53,7 @@ export function capacityFromObservation(row,now=new Date(),maxAgeSeconds=180,exp
     ordinaryUsageAllowed:typeof row.quota.ordinary_usage_allowed==='boolean'?row.quota.ordinary_usage_allowed:null,
     spendControlReached:typeof row.quota.spend_control_reached==='boolean'?row.quota.spend_control_reached:null,
     normalModelSlug:typeof row.quota.normal_model_slug==='string'?row.quota.normal_model_slug:null,
-    main,reserve,catalogue:{available:catalogueAvailable,models:catalogueAvailable?catalogueModels:[],
+    main,reserve,catalogue:{available:catalogueAvailable,models:catalogueAvailable?catalogueModels:[],observedAt:capabilities?.observed_at??null,
       validUntil:catalogueObservedMs===null?null:new Date(catalogueObservedMs+maxAgeSeconds*1000).toISOString()}};
 }
 

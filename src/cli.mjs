@@ -14,6 +14,9 @@ import { collectObservations, observationDelta } from './observation.mjs';
 import { createDashboardServer } from './dashboard.mjs';
 import { schedulingConfig } from './scheduling-config.mjs';
 import { observationConfig } from './observation-config.mjs';
+import { userInfo } from 'node:os';
+import { scheduleNext } from './scheduler.mjs';
+import { recordQuotaIncident } from './quota-incidents.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 export async function loadConfig(file) {
@@ -46,6 +49,7 @@ export async function runClaimedJob(config,store,github,job,baseDirectory,depend
   const run=dependencies.runJob || runJob;
   const publish=dependencies.publishJob || publishJob;
   const attempt=await run(config,store,github,job,baseDirectory,dependencies.runner);
+  if(attempt?.outcomeError)recordQuotaIncident(store,attempt.assignment,attempt.outcomeError,config,job.id,attempt.runId);
   if(config.publish && store.job(job.id).status==='completed') {
     try {await publish(config,store,github,store.job(job.id));}
     catch(error) {
@@ -67,6 +71,7 @@ async function main() {
   const args = process.argv.slice(2);
   const command = args[0] || 'help';
   if (command === 'help') {
+    console.log('Scheduling: schedule override ID --reason "..." | schedule clear-override ID (local worker lock required).');
     console.log('node src/cli.mjs <doctor|setup|status|metrics|observe|usage|stop-observe|dashboard|stop-dashboard|poll|run|stop|publish ID|retry ID|cancel ID|resume-quota> [--config path] [--once]\nmetrics --json exports worker telemetry. observe collects account quota/tokens once; --watch --interval 60 repeats. usage [--json] [--limit 100] reads saved account observations. stop-observe stops that observer. dashboard [--port 4173] serves the local dashboard; stop-dashboard stops only the dashboard. Default config: config.local.json. poll only queues; run executes.'); return;
   }
   const configIndex = args.indexOf('--config');
@@ -176,6 +181,17 @@ async function main() {
   process.on('SIGINT',()=>{ stopping=true; console.log('Stopping after the current operation.'); });
   process.on('SIGTERM',()=>{ stopping=true; });
   try {
+    if(command==='schedule') {
+      if(!config.scheduling.enabled)throw new Error('Scheduling is disabled');
+      const id=Number(args[2]);
+      if(args[1]==='override') {
+        const index=args.indexOf('--reason');
+        const overrideId=store.createOverride(id,userInfo().username,index<0?'':args[index+1]);
+        console.log(`Override ${overrideId} created for job ${id}; expires in 24 hours, consumed at admission.`);return;
+      }
+      if(args[1]==='clear-override') {console.log(`Revoked ${store.clearOverride(id)} override(s).`);return;}
+      throw new Error('Usage: schedule override ID --reason "..." | schedule clear-override ID');
+    }
     if (!store.get('firstStarted')) store.set('firstStarted',new Date().toISOString());
     if (command === 'resume-quota') { store.set('quotaPaused','no'); console.log('Queue unpaused. Existing quota_wait jobs remain preserved.'); return; }
     if (command === 'poll') {
@@ -212,10 +228,11 @@ async function main() {
         }
         if (existsSync(stopFile)) stopping=true;
         if (!stopping && store.get('quotaPaused') !== 'yes') {
-          const job = store.claim();
+          const admission=await scheduleNext(config,store,github);
+          const job=admission?.job;
           if (job) {
             console.log(`Running job ${job.id}: ${job.role} #${job.issue}`);
-            await runClaimedJob(config,store,github,job,root,{runner:{executor}});
+            await runClaimedJob(config,store,github,job,root,{runner:{executor,assignment:admission.assignment,beforeSpawn:admission.beforeSpawn}});
             console.log(`Job ${job.id}: ${store.job(job.id).status}`);
           }
         }

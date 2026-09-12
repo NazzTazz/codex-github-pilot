@@ -1,4 +1,22 @@
 import { profiles } from './core.mjs';
+import { codexEnvironment } from './process.mjs';
+
+export function executionSource(config) {
+  if(!config.scheduling?.enabled)return null;
+  const id=config.scheduling.observationSourceId??'local';
+  const source=config.observation?.accounts.find(account=>account.id===id);
+  if(config.observation&&!source)throw new Error('Unknown scheduling observation source');
+  return source??{id:'local',scopeId:'local-codex-account',codexHome:null};
+}
+
+export function executionEnvironment(config,parent=process.env) {
+  const env=codexEnvironment(parent),source=executionSource(config);
+  if(source?.codexHome) {
+    for(const key of Object.keys(env))if(key.toUpperCase()==='CODEX_HOME')delete env[key];
+    env.CODEX_HOME=source.codexHome;
+  }
+  return env;
+}
 
 export const schedulingDefaults=Object.freeze({enabled:false,conserveAtPercent:15,survivalBelowPercent:5,
   maxObservationAgeSeconds:180,quotaErrorCooldownSeconds:300,survivalPlanTimeoutMinutes:10,

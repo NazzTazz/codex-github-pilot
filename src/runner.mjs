@@ -1,10 +1,10 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { roles, profiles, executionFor, active, permitted, parseCommand, promptFor, validateResult } from './core.mjs';
+import { roles, profiles, executionFor, active, promptFor, validateResult } from './core.mjs';
 import { execute, codexEnvironment, agentEnvironment } from './process.mjs';
 import { createCodexExecutor, checkAuth, codexArgs } from './executors/codex.mjs';
-import { specificationHash } from './task-classification.mjs';
 import { localCodexTarget, schedulingConfig } from './scheduling-config.mjs';
+import { validateQueuedJob } from './job-validation.mjs';
 
 export { execute, agentEnvironment, checkAuth, codexArgs };
 async function gitCommand(args, cwd) {
@@ -49,31 +49,20 @@ export async function runJob(config, store, github, job, baseDirectory, dependen
   const git = dependencies.git || gitCommand;
   const authenticate = dependencies.authenticate || checkAuth;
   const jobStart=performance.now();
-  const execution=executionFor(job);
-  const assignment=staticAssignment(job,execution,config);
+  if(config.scheduling?.enabled&&(!dependencies.assignment||!dependencies.beforeSpawn))throw new Error('Quota-aware execution requires admission and a pre-spawn guard');
+  const assignment=dependencies.assignment??staticAssignment(job,executionFor(job),config);
   const executor=dependencies.executor || createCodexExecutor(config,{run:dependencies.execute || execute,
     schemaPath:path.join(baseDirectory,'result.schema.json')});
   const runId=store.startRun(job.id,assignment,null);
-  const attempt=()=>({runId,jobStart,status:store.job(job.id).status});
+  let outcomeError=null;
+  const attempt=()=>({runId,jobStart,status:store.job(job.id).status,assignment,outcomeError});
   try {
-    const issue = await github.issue(job.issue);
-    const comment = await github.request(`/issues/comments/${job.comment_id}`);
-    const command = parseCommand(comment.body);
-    const persistedMetadata=job.task_metadata_json ?? null;
-    const currentMetadata=command?.taskMetadata===null||command?.taskMetadata===undefined?null:JSON.stringify(command.taskMetadata);
-    const classificationChanged=command && (command.classificationError!==null
-      || command.taskClass!==(job.task_class || 'unclassified') || currentMetadata!==persistedMetadata);
-    if (!active(issue, config) || !permitted(comment, config) || command?.role !== job.role || command?.request !== job.request
-      || (command?.profile ?? null) !== (job.profile ?? null) || classificationChanged) {
-      store.update(job.id, {status:'cancelled', error:'Thread paused/closed or request/classification changed'}); return attempt();
+    const validation=await validateQueuedJob(config,github,job);
+    if(!validation.valid) {
+      if(validation.technical)throw new Error(validation.error);
+      store.update(job.id,{status:'cancelled',error:validation.error});return attempt();
     }
-    if(job.specification_hash && specificationHash(issue)!==job.specification_hash) {
-      store.update(job.id,{status:'cancelled',error:'Issue specification changed after queueing'});return attempt();
-    }
-    const pr = issue.pull_request ? await github.pr(job.issue) : null;
-    if (pr && (pr.head.repo?.full_name?.toLowerCase() !== config.repository.toLowerCase() || pr.state !== 'open')) {
-      throw new Error('Only open same-repository PRs are supported');
-    }
+    const {issue,pr}=validation;
     const role=roles[job.role];
     if (role.requiresPr && !pr) throw new Error('This role requires a PR with an explicit head commit');
     await authenticate(config);
@@ -95,6 +84,10 @@ export async function runJob(config, store, github, job, baseDirectory, dependen
     const input=executionInput(config,job,issue,sha,runId,taskMetadata);
     store.setRunInput(runId,input);
     await writeFile(path.join(directory,'task.txt'),input.prompt);
+    if(dependencies.beforeSpawn) {
+      const proof=await dependencies.beforeSpawn();
+      store.setSpawnProof(runId,proof);
+    }
     const outcome=await executor.execute(input,assignment,{workspacePath:checkout,outputDirectory:directory,onEvent:event=>{
       if(event.type==='worker-started')store.telemetry(runId,{worker_started_at:event.at,preparation_ms:Math.round(performance.now()-jobStart)});
       if(event.type==='spawned')store.telemetry(runId,{pid:event.pid});
@@ -105,8 +98,9 @@ export async function runJob(config, store, github, job, baseDirectory, dependen
       ...outcome.telemetry});
     if(outcome.status==='interrupted') {store.update(job.id,{status:'interrupted',error:outcome.error.message});return attempt();}
     if(outcome.status!=='completed') {
+      outcomeError=outcome.error;
       const quota=outcome.error?.kind==='quota';
-      if(quota)store.set('quotaPaused','yes');
+      if(quota&&!config.scheduling?.enabled)store.set('quotaPaused','yes');
       store.update(job.id,{status:quota?'quota_wait':'failed',error:outcome.error?.message || 'Codex execution failed'});
       return attempt();
     }

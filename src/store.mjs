@@ -40,7 +40,7 @@ export class Store {
     this.#columns('worker_runs',[
       ['scheduling_decision_id','INTEGER'],['target_id','TEXT'],['provider','TEXT'],['adapter','TEXT'],['adapter_version','TEXT'],
       ['capacity_scope_id','TEXT'],['model_effective','TEXT'],['effort_requested','TEXT'],['sandbox_effective','TEXT'],
-      ['quota_pool','TEXT'],['model_observed','TEXT'],['execution_input_json','TEXT']
+      ['quota_pool','TEXT'],['model_observed','TEXT'],['execution_input_json','TEXT'],['spawn_capacity_json','TEXT']
     ]);
     this.db.exec(`CREATE TABLE IF NOT EXISTS scheduling_decisions (
         id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL REFERENCES jobs(id), created_at TEXT NOT NULL,
@@ -77,6 +77,68 @@ export class Store {
   markSeen(id) { this.db.prepare('INSERT OR IGNORE INTO seen VALUES (?)').run(id); }
   jobs() { return this.db.prepare('SELECT * FROM jobs ORDER BY id').all(); }
   job(id) { return this.db.prepare('SELECT * FROM jobs WHERE id=?').get(id); }
+  transaction(fn) {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {const result=fn();if(result?.then)throw new Error('Transactions must be synchronous');this.db.exec('COMMIT');return result;}
+    catch(error) {this.db.exec('ROLLBACK');throw error;}
+  }
+  candidates() {return this.db.prepare("SELECT * FROM jobs WHERE status IN ('queued','deferred') ORDER BY id").all();}
+  hasRunning() {return !!this.db.prepare("SELECT 1 FROM jobs WHERE status='running'").get();}
+  overrides(id) {return this.db.prepare('SELECT * FROM scheduling_overrides WHERE job_id=? ORDER BY id DESC').all(id);}
+  activeOverride(id,now) {
+    return this.overrides(id).find(row=>!row.consumed_at&&!row.revoked_at&&Date.parse(row.expires_at)>Date.parse(now))??null;
+  }
+  createOverride(id,actor,reason,now=new Date().toISOString()) {
+    if(typeof actor!=='string'||!actor.trim()||typeof reason!=='string'||!reason.trim()||reason.length>2000)throw new Error('Override requires an actor and a reason (1–2000 characters)');
+    return this.transaction(()=>{
+      if(!['queued','deferred'].includes(this.job(id)?.status))throw new Error('Override requires a queued/deferred job');
+      this.db.prepare('UPDATE scheduling_overrides SET revoked_at=? WHERE job_id=? AND revoked_at IS NULL AND consumed_at IS NULL').run(now,id);
+      return Number(this.db.prepare('INSERT INTO scheduling_overrides (job_id,created_at,expires_at,actor,reason) VALUES (?,?,?,?,?)')
+        .run(id,now,new Date(Date.parse(now)+86400000).toISOString(),actor,reason.trim()).lastInsertRowid);
+    });
+  }
+  clearOverride(id,now=new Date().toISOString()) {
+    return this.transaction(()=>{
+      if(!this.job(id))throw new Error('Unknown job');
+      return this.db.prepare('UPDATE scheduling_overrides SET revoked_at=? WHERE job_id=? AND revoked_at IS NULL AND consumed_at IS NULL').run(now,id).changes;
+    });
+  }
+  incidents(scope,accountKey) {
+    // Canonical account identity survives renamed sources and duplicate account homes.
+    return this.db.prepare(`SELECT * FROM quota_incidents WHERE cleared_at IS NULL AND
+      ((account_key IS NOT NULL AND account_key=?) OR (account_key IS NULL AND capacity_scope_id=?)) ORDER BY id`).all(accountKey,scope);
+  }
+  openIncident({scope,accountKey,pool,kind,now,notBefore,observedAt=null,jobId=null,runId=null}) {
+    const existing=this.incidents(scope,accountKey).find(row=>row.quota_pool===pool&&row.kind===kind);
+    if(existing)return existing.id;
+    return Number(this.db.prepare(`INSERT INTO quota_incidents
+      (capacity_scope_id,quota_pool,account_key,created_at,observed_at,job_id,worker_run_id,kind,not_before) VALUES (?,?,?,?,?,?,?,?,?)`)
+      .run(scope,pool,accountKey,now,observedAt,jobId,runId,kind,notBefore).lastInsertRowid);
+  }
+  clearIncident(id,now) {this.db.prepare("UPDATE quota_incidents SET cleared_at=?,cleared_reason='fresh-provider-proof' WHERE id=? AND cleared_at IS NULL").run(now,id);}
+  decision(id) {
+    const row=this.db.prepare('SELECT * FROM scheduling_decisions WHERE id=?').get(id);
+    return row?{...row,decision:JSON.parse(row.decision_json)}:null;
+  }
+  // Caller owns the short admission transaction. No policy or network in Store.
+  saveDecision(job,decision,fingerprint,kind,now) {
+    if(kind==='evaluation'&&this.decision(job.last_schedule_decision_id??null)?.fingerprint===fingerprint)return null;
+    const id=Number(this.db.prepare(`INSERT INTO scheduling_decisions (job_id,created_at,kind,action,reason_code,fingerprint,decision_json)
+      VALUES (?,?,?,?,?,?,?)`).run(job.id,now,kind,decision.action,decision.reasonCode,fingerprint,JSON.stringify(decision)).lastInsertRowid);
+    if(decision.assignment) {
+      decision.assignment.decisionId=id;
+      this.db.prepare('UPDATE scheduling_decisions SET decision_json=? WHERE id=?').run(JSON.stringify(decision),id);
+    }
+    const status=kind==='admission'?'running':decision.action==='invalid'?'invalid':'deferred';
+    this.db.prepare(`UPDATE jobs SET status=?,last_schedule_decision_id=?,deferred_since=?,updated=? WHERE id=?`)
+      .run(status,id,status==='deferred'?(job.deferred_since??now):null,now,job.id);
+    if(kind==='admission'&&decision.assignment?.overrideId) {
+      const changed=this.db.prepare('UPDATE scheduling_overrides SET consumed_at=? WHERE id=? AND consumed_at IS NULL AND revoked_at IS NULL AND expires_at>?')
+        .run(now,decision.assignment.overrideId,now).changes;
+      if(changed!==1)throw new Error('Override changed during admission');
+    }
+    return id;
+  }
   startRun(id,assignmentOrModel,inputOrEffort=null) {
     if(typeof assignmentOrModel==='string')return Number(this.db.prepare('INSERT INTO worker_runs (job_id,model_requested,reasoning_effort,job_started_at) VALUES (?,?,?,?)')
       .run(id,assignmentOrModel,inputOrEffort,new Date().toISOString()).lastInsertRowid);
@@ -89,6 +151,7 @@ export class Store {
         assignment.requestedEffort??assignment.effort,assignment.sandbox,assignment.quotaPool??null,input===null?null:JSON.stringify(input)).lastInsertRowid);
   }
   setRunInput(id,input) { this.db.prepare('UPDATE worker_runs SET execution_input_json=? WHERE id=?').run(JSON.stringify(input),id); }
+  setSpawnProof(id,proof) {this.db.prepare('UPDATE worker_runs SET spawn_capacity_json=? WHERE id=?').run(JSON.stringify(proof),id);}
   telemetry(id,fields) {
     const allowed=['worker_started_at','finished_at','preparation_ms','worker_ms','total_ms','pid','exit_code','timed_out',
       'session_id','completed_turns','input_tokens','cached_input_tokens','cache_write_input_tokens','output_tokens',
@@ -144,8 +207,8 @@ export class Store {
       .run(...Object.values(fields), new Date().toISOString(), id);
   }
   claim() {
-    return this.db.prepare(`UPDATE jobs SET status='running', updated=? WHERE id=(
-      SELECT id FROM jobs WHERE status='queued' ORDER BY id LIMIT 1)
+    return this.db.prepare(`UPDATE jobs SET status='running', deferred_since=NULL, updated=? WHERE id=(
+      SELECT id FROM jobs WHERE status IN ('queued','deferred') ORDER BY id LIMIT 1)
       AND NOT EXISTS (SELECT 1 FROM jobs WHERE status='running') RETURNING *`)
       .get(new Date().toISOString());
   }

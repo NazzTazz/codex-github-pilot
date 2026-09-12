@@ -313,3 +313,85 @@ Les deux P2 restants ont été corrigés à la demande de l'utilisateur :
 - La fraîcheur globale décrit l'âge du relevé ; les resets invalident séparément main et réserve. Un reset main dépassé ne rend plus une réserve fraîche inutilisable. Chaque pool expose son `validUntil` (minimum âge/reset), distinct de celui du relevé et du catalogue. L'admission T4 reste hors périmètre.
 
 Preuve rouge avant modification du code : les deux nouvelles régressions échouaient (0/2). Après correction : suite complète **75/75**, tests T3 **8/8**, dont les refus supplémentaires pour override inactif et catalogue périmé en réserve. Syntaxe des deux modules corrigés et `git diff --check` réussis (avertissements LF/CRLF habituels). Aucun worker réel, compte personnel ou service modifié. Changements non commités.
+
+## Livraison T4 — admission, incidents et overrides — 12 septembre 2026
+
+Base : `f3c3b77`, branche `feat/quota-aware-foundations`. Implémentation demandée directement par l'utilisateur après la recette T3. Contrat : sections 10.3–10.8 et amendement 10.11 de `quota-aware-scheduling-spec.md`. Le dashboard scheduling, ses projections CLI/HTTP et la recette visuelle sont le lot suivant ; aucun relais multi-worker ajouté.
+
+Changements :
+
+- `scheduleNext` examine queued/deferred par ID, conserve les reports sans checkout ni worker_run, revalide GitHub via `job-validation.mjs`, puis relit identité et capacité avant décision/claim atomiques. Transactions `BEGIN IMMEDIATE` synchrones, aucun réseau en transaction ; pas d'admission concurrente avec un running.
+- `Store` persiste les décisions versionnées, déduplique les reports par fingerprint stable, remet `deferred_since` à null à l'admission et consomme l'override dans la même transaction. Une exception annule décision, claim et consommation ensemble.
+- `quota-incidents.mjs` gère les incidents par compte canonique et pool, y compris entre sources renommées ou dupliquées. Cooldown et preuve ultérieure positive obligatoires ; spend-control exige false explicite après true ; récupération d'un alias indisponible exige aussi un catalogue ultérieur. Une observation spend-control est prise en compte même lorsque la file est vide. Les évaluations read-only simulent la récupération sans la persister.
+- La sonde d'identité utilise seulement account/read et rateLimits/read, avec le même schéma canonique que l'observateur. Elle ne persiste rien et ne lance ni catalogue, ni usage, ni thread/turn. Auth et executor utilisent également l'environnement de la source explicitement sélectionnée. Mode désactivé : environnement historique hérité, aucun routage multi-compte implicite.
+- Le runner reçoit l'affectation admise et refuse un appel quota-aware sans garde avant lancement. La garde revérifie compte, liaison de configuration, permission, pool, catalogue et incidents après préparation ; elle ne réécrit pas le profil au seul changement de phase économique. La preuve avant lancement est enregistrée dans la colonne additive `worker_runs.spawn_capacity_json` ; l'âge à l'admission est conservé dans l'audit.
+- L'orchestrateur ouvre l'incident après un outcome quota, sans remettre le verrou historique global. Les erreurs détectées uniquement par la regex de l'adaptateur restent explicitement `quota-suspected`, sans reset inventé. Les tentatives échouées, checkouts et overrides consommés restent conservés ; aucun fallback ou retry automatique.
+- `schedule override ID --reason "..."` et `schedule clear-override ID` sont locaux, sous verrou worker. Durée 24 h, auteur OS, un override actif par job. `resume-quota` ne retire que le verrou historique. `recover` conserve deferred ; désactiver la policy permet leur admission historique. Ces effets et les limites sont documentés dans README.
+
+Validation réellement exécutée :
+
+- Suite complète : **97/97 réussis**, dont 19 tests fonctionnels T4 et 3 tests de mutations isolées.
+- Deux connexions SQLite concurrentes : une seule admission. Rollback injecté après écriture de décision : aucun claim ni override consommé résiduel.
+- Relevé, identité ou override modifiés pendant GitHub : aucune admission périmée. Compte modifié pendant préparation : aucun appel executor, tentative failed conservée.
+- Parcours admission → runner → vrai adaptateur avec processus simulé : argv Terra/medium, demande auditée Sol/high, home Lite sélectionné, un seul appel et aucun fallback.
+- Trois mutations en copies temporaires détectées : source par défaut substituée à la source sélectionnée ; contrôle d'identité retiré ; weekly Spark substituée à main. Leurs tests attendent l'échec réel des scénarios ciblés, pas seulement la présence d'un morceau de texte.
+- Régression supplémentaire trouvée en auto-relecture : spend-control avec file vide, rouge 0/1 puis vert 1/1 après correction.
+- Syntaxe des 13 modules/tests concernés : réussie. `git diff --check` : réussi, avertissements LF/CRLF habituels seulement.
+
+Limites : validation sur fixtures et faux processus, pas une recette indépendante ni une preuve de génération réelle en réserve. Aucun compte personnel, `config.local.json`, état opérationnel ou service local manipulé ; aucun appel modèle ou GitHub réel. Les sources du dashboard sont inchangées, donc pas de build/recette visuelle à cette tranche. Les copies temporaires de test ont été supprimées. Changements **non commités**, prêts pour une contre-recette indépendante avant commit/push.
+
+## Contre-recette indépendante T4 — 12 septembre 2026
+
+Verdict : **changes_requested**. Deux défauts P1 reproduits sur les changements non commités au-dessus de `f3c3b77`. Contrat examiné : admission/incidents/overrides et audit des sections 10.3–10.8, avec l'amendement 10.11 de `quota-aware-scheduling-spec.md`. Les projections scheduling et leur recette visuelle restent dans le lot suivant.
+
+### P1 — Un commentaire supprimé bloque durablement les jobs suivants
+
+Localisation : `src/scheduler.mjs:133`, appel de validation avant admission ; lecture du commentaire dans `src/job-validation.mjs:6`.
+
+Reproduction : deux jobs routine admissibles, quota et catalogue valides, commentaire du premier supprimé sur GitHub. Le vrai client GitHub est utilisé avec un transport HTTP simulé renvoyant 404 uniquement pour ce commentaire. Deux appels successifs à `scheduleNext` lèvent `GitHub HTTP 404; retry-after=unspecified`. Les deux jobs restent `queued`, aucune admission n'est produite. Le second commentaire reste pourtant disponible et valide.
+
+Cause : l'exception de validation sort de la boucle avant toute transition du candidat et avant l'examen du suivant. Le catch du CLI journalise l'erreur puis réessaie la même tête de file au prochain cycle. L'ancien chemin faisait cette validation après claim, dans le try/catch du runner, et ne conservait donc pas indéfiniment ce job en tête des candidats.
+
+Correction minimale : traiter explicitement la disparition du commentaire/job lors de la validation, conserver un état/motif local terminal approprié et continuer vers le candidat suivant. Distinguer cette disparition des pannes réseau ou erreurs d'authentification ; ne pas transformer toute exception GitHub en suppression. Ajouter une régression passant par le client GitHub et son 404 réel simulé.
+
+### P1 — Une panne de sonde d'identité efface la mémoire de spend-control
+
+Localisation : `src/scheduler.mjs:119` et `src/quota-incidents.mjs:19` ; retour anticipé de `src/capacity.mjs:31`.
+
+Reproduction : un relevé récent du bon scope et du compte canonique contient `spend_control_reached=true`, mais la sonde d'identité échoue et renvoie null pendant `scheduleNext`. Le job est différé, toutefois aucun incident n'est ouvert. Après 31 secondes, la sonde reconnaît de nouveau le même compte et le nouveau relevé contient `spend_control_reached=null`, quota positif et permission true. Le job passe alors `running` et sa garde `beforeSpawn` réussit. Aucun false explicite n'a été observé.
+
+Cause : la capacité utilisée pour mémoriser le signal négatif est déjà filtrée par l'identité d'exécution. L'identité momentanément inconnue produit une qualité invalid et masque le booléen du relevé ; `reconcileIncidents` n'enregistre donc rien. Le prochain relevé remplace le true et l'obligation de récupération explicite est perdue. Cela viole 10.4/10.6 (true → null ne constitue pas une récupération).
+
+Correction minimale : séparer la mémorisation du signal négatif fournisseur et la preuve positive nécessaire à l'admission. Persister le true du relevé valide et scoped sous son compte canonique même lorsque la sonde d'exécution est indisponible ; conserver le refus d'admission tant que l'identité est inconnue et exiger ensuite false explicite et cooldown pour lever l'incident. Ne pas supprimer le contrôle d'identité de l'admission.
+
+### Preuves et état du dépôt
+
+- `npm test` : **97/97 réussis**, mutations T4 comprises.
+- `node --test review/t4-counter-acceptance.mjs` : **3 témoins réussis, 2 régressions échouées**. Les témoins vérifient une admission saine, le blocage true → null avec identité disponible et la récupération après false explicite. Les deux échecs démontrent les P1 ci-dessus ; le second vérifie aussi la garde avant lancement. Le fichier est conservé comme sonde de contre-recette exécutable explicitement, hors des fichiers de tests livrés.
+- `node --check` : **14 fichiers réussis**, modules/tests T4 et sonde indépendante.
+- `npm run dashboard:build` : réussi (TypeScript et Vite). Vérification de compilation uniquement, sans recette visuelle ni serveur dashboard.
+- `git diff --check` : réussi, avertissements LF/CRLF habituels seulement.
+
+Aucun correctif applicatif réalisé. Seuls ce journal et `review/t4-counter-acceptance.mjs` sont ajoutés/modifiés par cette contre-recette. Aucun compte personnel, credential, `config.local.json` ou état opérationnel lu/modifié ; aucune requête GitHub réelle, génération, publication, commit ou push. Les sondes utilisent SQLite en mémoire et un transport GitHub simulé. La T4 reste à corriger puis à recetter de nouveau avant validation.
+
+## Corrections des deux P1 T4 — 12 septembre 2026
+
+Corrections réalisées à la demande explicite de l'utilisateur. Les deux reproductions ont été réexécutées avant modification applicative : **3 témoins verts, 2 régressions rouges**, avec blocage de file sur 404 et admission/garde avant lancement acceptées après perte de spend-control.
+
+- `src/github.mjs` expose désormais `GitHubHttpError` avec le statut HTTP, en conservant le message existant. `src/job-validation.mjs` transforme uniquement les réponses 404/410 des lectures issue/commentaire/PR en validation négative avec motif de ressource indisponible. Le scheduler annule ce candidat et continue vers le suivant. Les erreurs 401/403/429/500 et réseau remontent sans annuler les jobs.
+- `src/quota-incidents.mjs` mémorise le true à partir du dernier relevé valide et frais de la source/scope sélectionnés, sous l'identité canonique de ce relevé. Cette preuve négative peut uniquement ouvrir des incidents. L'admission et leur récupération continuent d'utiliser la capacité liée à la sonde d'identité d'exécution : une identité inconnue ou différente reste bloquante, null ne remplace pas false, et le cooldown reste obligatoire. Aucune écriture n'est ajoutée aux projections read-only ni à l'observateur.
+- Les sondes ont été déplacées de `review/t4-counter-acceptance.mjs` vers `test/t4-counter-acceptance.test.mjs`, pour être exécutées automatiquement par `npm test`. Quatre tests supplémentaires couvrent les ressources disparues, les erreurs transitoires/auth, la déduplication et la récupération avec identité rétablie, ainsi que les mauvais scopes/sources, relevés invalides/périmés, comptes distincts et projections sans mutation.
+
+Validation : tests ciblés de contre-recette **9/9 réussis** ; suite complète **106/106 réussis**, dont les trois mutations isolées T4 ; syntaxe des quatre fichiers modifiés/ajoutés et `git diff --check` réussis (avertissements LF/CRLF habituels seulement). Le build dashboard avait réussi pendant la contre-recette et ses sources ne changent pas dans ce correctif.
+
+Les deux P1 démontrés sont corrigés et leurs reproductions intégrées à la suite. Vérification sur fixtures, SQLite en mémoire et transport GitHub simulé ; aucun worker réel ni accès aux comptes personnels ou à l'état opérationnel. Base Git toujours `f3c3b77`, changements non commités, aucun push.
+
+## Vérification ciblée après corrections P1 T4 — 12 septembre 2026
+
+Verdict : **pass sur les deux correctifs examinés**, sans nouveau défaut matériel trouvé dans cette passe ciblée. Relecture du traitement HTTP typé, de la validation partagée et de la séparation entre preuve négative observée et identité exigée pour admission/récupération.
+
+Preuves réexécutées : tests de contre-recette **9/9**, suite complète **106/106**, syntaxe des quatre fichiers corrigés et `git diff --check` réussis. Les tests distinguent bien 404/410 des erreurs auth/réseau et exigent une identité rétablie ainsi qu'un false explicite après cooldown.
+
+Vérification supplémentaire indépendante en copie temporaire : retrait du traitement 404/410 → régression du commentaire supprimé rouge ; rétablissement → verte. Remplacement de la condition d'ouverture sur preuve observée par l'ancienne condition sur capacité liée à l'identité → régression spend-control rouge ; rétablissement → verte. La baseline corrigée passe les deux scénarios. Le script ponctuel et toutes ses copies temporaires ont été supprimés ; aucun code applicatif ou test livré modifié pendant cette passe.
+
+Cette vérification ciblée complète la contre-recette précédente, sans prétendre constituer un nouvel audit exhaustif. Aucun worker, modèle, GitHub réel ou compte personnel utilisé. Seul ce journal est complété ; aucune opération de commit/push.

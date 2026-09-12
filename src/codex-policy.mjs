@@ -7,6 +7,7 @@ const rank={"luna-medium":0,"terra-medium":1,"sol-medium":2,"sol-high":2,"astra-
 
 export function policyHash(config,target) {
   const value={version:policyVersion,conserveAtPercent:config.conserveAtPercent,survivalBelowPercent:config.survivalBelowPercent,
+    maxObservationAgeSeconds:config.maxObservationAgeSeconds,quotaErrorCooldownSeconds:config.quotaErrorCooldownSeconds,
     survivalPlanTimeoutMinutes:config.survivalPlanTimeoutMinutes,reserveEnabled:config.reserveEnabled,
     observationSourceId:target.observationSourceId,scopeId:target.capacityScopeId,offeredProfiles:[...target.offeredProfiles].sort()};
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');

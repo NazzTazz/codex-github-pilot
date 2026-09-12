@@ -2,12 +2,34 @@ import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import { createHash } from 'node:crypto';
 import { codexEnvironment } from './process.mjs';
+import { executionEnvironment } from './scheduling-config.mjs';
 
 const readMethods = new Set(['initialize','account/read','account/rateLimits/read','account/usage/read','model/list']);
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const number = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
 const MAIN_LIMIT = 'codex';
 const RESERVE_LIMIT = 'base_model_inference';
+
+export function canonicalAccountKey(result,email) {
+  if(typeof result?.accountId==='string'&&result.accountId)return createHash('sha256').update('account:'+result.accountId).digest('hex');
+  return typeof email==='string'&&email?createHash('sha256').update('chatgpt:'+email.toLowerCase()).digest('hex'):null;
+}
+
+// Read-only identity probe, not an observer: no persistence, usage, catalogue or model turn.
+export async function readExecutionIdentity(config,{createClient}={}) {
+  const env=executionEnvironment(config);
+  let client;
+  try {
+    client=createClient?createClient(env):new ObservationClient(config.codexCommand,{env});
+    await client.initialize();
+    const auth=await client.request('account/read',{refreshToken:false});
+    if(auth?.account?.type!=='chatgpt')return null;
+    const quota=await client.request('account/rateLimits/read',{excludeResetCreditDetails:true});
+    quotaWindows(quota); // Require a valid response before using the email fallback, like the observer.
+    return canonicalAccountKey(quota,auth.account.email);
+  } catch {return null;}
+  finally {if(client)await client.close().catch(()=>{});}
+}
 
 // This client can only read account data. It never creates a thread or a model turn.
 export class ObservationClient {
@@ -166,7 +188,6 @@ export async function collectObservation(config, store, source=null, options={})
     // Keep the auth identity only in memory until quota confirms the account snapshot.
     // A failed quota read must not replace the canonical provider key with an email key.
     const email=auth.account.email;
-    const emailKey=typeof email==='string'&&email?createHash('sha256').update('chatgpt:'+email.toLowerCase()).digest('hex'):null;
     const catalogueEnabled=config.scheduling?.enabled&&config.scheduling.observationSourceId===source.id;
     const requests=[
       client.request('account/rateLimits/read',{excludeResetCreditDetails:true}).then(result=>{
@@ -177,8 +198,7 @@ export async function collectObservation(config, store, source=null, options={})
           normal_model_slug:typeof reserve?.normalModelSlug==='string'?reserve.normalModelSlug:null,
           spend_control_reached:typeof main?.spendControlReached==='boolean'?main.spendControlReached:null,
           raw:result};
-        sample.account_key=typeof result.accountId==='string'&&result.accountId
-          ?createHash('sha256').update('account:'+result.accountId).digest('hex'):emailKey;
+        sample.account_key=canonicalAccountKey(result,email);
       }),
       client.request('account/usage/read').then(result=>{
         sample.usage={...tokenUsage(result),raw:result};sample.usage_observed_at=new Date().toISOString();

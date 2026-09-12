@@ -80,8 +80,52 @@ Avec plusieurs comptes observés, `scheduling.observationSourceId` lie explicite
 la future cible d'exécution à une source. Il est obligatoire avant d'activer la
 policy et ne dépend pas de `observation.defaultAccountId`. Une collecte activée lit
 le catalogue de modèles uniquement pour cette source, dans son `CODEX_HOME` isolé.
-T3 calcule seulement les décisions quota-aware ; leur admission dans la file reste
-désactivée jusqu'à T4, et la configuration personnelle n'est jamais modifiée.
+T4 raccorde ces décisions à `run` lorsque `scheduling.enabled` vaut `true`.
+**L'activation change le compte d'exécution** : auth, contrôle d'identité et executor
+utilisent le home de la source explicitement sélectionnée. Désactivé, l'environnement
+historique reste hérité, indépendamment des cartes observées. La configuration
+personnelle n'est jamais modifiée automatiquement.
+
+L'observateur doit déjà tourner et fournir un relevé et un catalogue frais de la
+source sélectionnée. Le worker ne démarre pas d'observateur : ses sondes d'identité
+sont en lecture seule, sans génération. Un compte inconnu/différent, un catalogue
+absent ou un quota périmé reporte la tâche sans checkout ni tentative.
+
+L'admission sélectionne le premier job admissible par ID, sans rester bloquée
+derrière un travail coûteux. `run --once` lance au plus un worker. Les reports
+inchangés ne multiplient pas les décisions ; ils sont réévalués à chaque boucle.
+L'affectation admise reste figée : un changement de phase économique pendant la
+préparation ne la réécrit pas. Identité et contraintes techniques sont revérifiées
+avant génération ; un échec conserve la tentative et n'entraîne aucun fallback.
+
+Overrides locaux (sous le même verrou que le worker) :
+
+```powershell
+node src/cli.mjs schedule override 42 --reason "Terminer cette tâche avec le profil demandé"
+node src/cli.mjs schedule clear-override 42
+```
+
+Un override dure 24 h, ne vise qu'un job queued/deferred et est consommé une seule
+fois à l'admission, même si la préparation échoue. Il contourne l'économie, jamais
+les contraintes techniques, le plancher du rôle ou un incident quota.
+
+Les incidents sont propres au compte canonique et au pool main/réserve : changer
+de nom de source ou de home pour le même compte ne les contourne pas. La reprise
+exige le cooldown puis une observation postérieure prouvant la disponibilité ;
+un reset seul ou une permission inconnue ne suffisent pas. Après spend-control=true,
+false explicite est obligatoire. Les erreurs repérées uniquement par texte sont
+des suspicions de quota, sans reset inventé.
+
+`resume-quota` retire uniquement le verrou historique global, pas les incidents.
+`retry` refuse toujours un checkout existant et ne s'applique pas aux deferred.
+**Désactiver la policy rend les deferred éligibles au routage historique**, sans
+les protections économiques et les incidents de T4. Arrêter/redémarrer Pilot et
+obtenir de nouveaux relevés après tout changement externe de connexion/configuration.
+Le dernier contrôle ne verrouille pas les credentials contre une modification
+externe ultérieure. La réserve reste expérimentale et opt-in.
+
+Les projections CLI/dashboard scheduling et leur recette visuelle restent le lot
+suivant ; les cartes actuelles continuent d'afficher les quotas observés.
 
 ## Résultats et publication
 

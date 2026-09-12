@@ -2,7 +2,8 @@ import { openSync, writeSync, closeSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { Telemetry } from '../telemetry.mjs';
-import { codexEnvironment, execute as executeProcess } from '../process.mjs';
+import { execute as executeProcess } from '../process.mjs';
+import { executionEnvironment } from '../scheduling-config.mjs';
 
 const quotaPattern = /usage limit|quota|rate.limit|limit reached|try again at/i;
 const supportedEfforts = new Set(['low','medium','high','xhigh','max']);
@@ -22,7 +23,7 @@ export function codexArgs(config, assignment, directory, output, schema) {
 }
 
 export async function checkAuth(config, run = executeProcess) {
-  const result = await run(config.codexCommand[0], [...config.codexCommand.slice(1), 'login', 'status'], {env:codexEnvironment()});
+  const result = await run(config.codexCommand[0], [...config.codexCommand.slice(1), 'login', 'status'], {env:executionEnvironment(config)});
   if (result.code !== 0 || !/Logged in using ChatGPT/i.test(result.stdout + result.stderr)) {
     throw new Error('ChatGPT login not confirmed. Run codex login status in the same Windows account. API fallback is disabled.');
   }
@@ -47,7 +48,7 @@ export function createCodexExecutor(config, {run=executeProcess, schemaPath}={})
       let result;
       try {
         result=await run(config.codexCommand[0],codexArgs(config,assignment,context.workspacePath,output,schemaPath),{
-          cwd:context.workspacePath,env:codexEnvironment(),input:input.prompt,timeoutMs:assignment.timeoutMs,
+          cwd:context.workspacePath,env:executionEnvironment(config),input:input.prompt,timeoutMs:assignment.timeoutMs,
           onStdout:data=>{writeSync(stdout,data);telemetry.feed(data);},
           onStderr:data=>writeSync(stderr,data),
           onSpawn:pid=>context.onEvent?.({type:'spawned',pid})
@@ -64,7 +65,7 @@ export function createCodexExecutor(config, {run=executeProcess, schemaPath}={})
         report:null,sessionId:telemetry.sessionId ?? null,telemetry:telemetry.snapshot(),artifacts,...processFields};
       if(result.code!==0) {
         const quota=quotaPattern.test(result.stderr+result.stdout);
-        return {status:'failed',error:{kind:quota?'quota':'process',message:quota?'Quota unavailable; retry explicitly when available':'Codex failed; see local stderr.log'},
+        return {status:'failed',error:{kind:quota?'quota':'process',...(quota?{incidentKind:'quota-suspected'}:{}),message:quota?'Quota unavailable; retry explicitly when available':'Codex failed; see local stderr.log'},
           report:null,sessionId:telemetry.sessionId ?? null,telemetry:telemetry.snapshot(),artifacts,...processFields};
       }
       let report;
