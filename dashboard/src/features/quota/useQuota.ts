@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { QuotaResponse } from './types';
+import type { AccountsQuotaResponse } from './types';
 
 export function useQuota() {
-  const [data,setData]=useState<QuotaResponse|null>(null);
+  const [data,setData]=useState<AccountsQuotaResponse|null>(null);
   const [loading,setLoading]=useState(true);
   const [networkError,setNetworkError]=useState(false);
   const request=useRef<AbortController|null>(null);
@@ -13,10 +13,10 @@ export function useQuota() {
     const timeout=setTimeout(()=>controller.abort(),10000);
     setLoading(true);
     try {
-      const response=await fetch('/api/quota',{signal:controller.signal,cache:'no-store'});
+      const response=await fetch('/api/accounts/quota',{signal:controller.signal,cache:'no-store'});
       if(!response.ok)throw new Error('Quota unavailable');
-      const next:QuotaResponse=await response.json();
-      if(!next || !['empty','ok','partial','error'].includes(next.collectionStatus) || !Array.isArray(next.errors))throw new Error('Invalid quota payload');
+      const next:AccountsQuotaResponse=await response.json();
+      if(!next || !Array.isArray(next.accounts)||next.accounts.some(account=>!['empty','ok','partial','error'].includes(account.collectionStatus)||!Array.isArray(account.errors)))throw new Error('Invalid quota payload');
       if(active.current && request.current===controller){setData(next);setNetworkError(false);}
     } catch {
       if(active.current && request.current===controller)setNetworkError(true);

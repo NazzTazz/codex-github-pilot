@@ -35,7 +35,8 @@ export class Store {
       if (!this.db.prepare('PRAGMA table_info(jobs)').all().some(column => column.name === name)) this.db.exec(`ALTER TABLE jobs ADD COLUMN ${name} ${definition}`);
     }
     this.#columns('jobs',[['last_schedule_decision_id','INTEGER'],['deferred_since','TEXT']]);
-    this.#columns('account_observations',[['capacity_scope_id',"TEXT NOT NULL DEFAULT 'local-codex-account'"],['capabilities_json','TEXT']]);
+    this.#columns('account_observations',[['capacity_scope_id',"TEXT NOT NULL DEFAULT 'local-codex-account'"],['capabilities_json','TEXT'],
+      ['observation_source_id',"TEXT NOT NULL DEFAULT 'local'"]]);
     this.#columns('worker_runs',[
       ['scheduling_decision_id','INTEGER'],['target_id','TEXT'],['provider','TEXT'],['adapter','TEXT'],['adapter_version','TEXT'],
       ['capacity_scope_id','TEXT'],['model_effective','TEXT'],['effort_requested','TEXT'],['sandbox_effective','TEXT'],
@@ -102,11 +103,26 @@ export class Store {
   }
   recordObservation(sample) {
     return Number(this.db.prepare(`INSERT INTO account_observations
-      (started_at,finished_at,account_key,plan_type,source,status,quota_observed_at,usage_observed_at,quota_json,usage_json,errors_json,capacity_scope_id,capabilities_json)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(sample.started_at,sample.finished_at,sample.account_key,sample.plan_type,
+      (started_at,finished_at,account_key,plan_type,source,status,quota_observed_at,usage_observed_at,quota_json,usage_json,errors_json,capacity_scope_id,capabilities_json,observation_source_id)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(sample.started_at,sample.finished_at,sample.account_key,sample.plan_type,
         sample.source,sample.status,sample.quota_observed_at,sample.usage_observed_at,
         sample.quota===null?null:JSON.stringify(sample.quota),sample.usage===null?null:JSON.stringify(sample.usage),JSON.stringify(sample.errors),
-        sample.capacity_scope_id??'local-codex-account',sample.capabilities===undefined||sample.capabilities===null?null:JSON.stringify(sample.capabilities)).lastInsertRowid);
+        sample.capacity_scope_id??'local-codex-account',sample.capabilities===undefined||sample.capabilities===null?null:JSON.stringify(sample.capabilities),
+        sample.observation_source_id??'local').lastInsertRowid);
+  }
+  observationsBySource(sourceId,limit=100) {
+    if(typeof sourceId!=='string'||!sourceId||!Number.isSafeInteger(limit)||limit<1||limit>10000)throw new Error('Invalid observation query');
+    return this.db.prepare('SELECT * FROM account_observations WHERE observation_source_id=? ORDER BY id DESC LIMIT ?').all(sourceId,limit).reverse().map(row=>this.#observation(row));
+  }
+  latestObservations(sourceIds) {
+    if(!Array.isArray(sourceIds)||sourceIds.some(id=>typeof id!=='string'||!id))throw new Error('Invalid observation sources');
+    const statement=this.db.prepare('SELECT * FROM account_observations WHERE observation_source_id=? ORDER BY id DESC LIMIT 1');
+    return sourceIds.map(id=>{const row=statement.get(id);return row?this.#observation(row):null;});
+  }
+  #observation(row) {
+    const {quota_json,usage_json,errors_json,capabilities_json,...fields}=row;
+    return {...fields,quota:quota_json===null?null:JSON.parse(quota_json),usage:usage_json===null?null:JSON.parse(usage_json),errors:JSON.parse(errors_json),
+      capabilities:capabilities_json===null?null:JSON.parse(capabilities_json)};
   }
   observations(limit=100) {
     if(!Number.isSafeInteger(limit) || limit<1 || limit>10000)throw new Error('Observation limit must be between 1 and 10000');

@@ -37,17 +37,41 @@ export function quotaPayload(row, now=Date.now()) {
 }
 
 export function readQuota(stateDirectory, now=Date.now()) {
+  const account=readAccountsQuota(stateDirectory,undefined,now).accounts[0];
+  const {id,label,planType,identityStatus,sharedQuotaWith,observationId,...payload}=account;
+  return payload;
+}
+
+const legacyObservation=()=>({mode:'legacy',defaultAccountId:'local',accounts:[{id:'local',label:'Codex',codexHome:null,scopeId:'local-codex-account'}]});
+export function readAccountsQuota(stateDirectory,observation=legacyObservation(),now=Date.now()) {
   const file=path.join(stateDirectory,'queue.sqlite');
-  if(!existsSync(file))return quotaPayload(null,now);
+  const empty=()=>({serverTime:new Date(now).toISOString(),defaultAccountId:observation.defaultAccountId,
+    accounts:observation.accounts.map(account=>({id:account.id,label:account.label,planType:null,identityStatus:'unknown',sharedQuotaWith:[],
+      observationId:null,...quotaPayload(null,now)}))});
+  if(!existsSync(file))return empty();
   const db=new DatabaseSync(file,{readOnly:true});
   try {
     db.exec('PRAGMA busy_timeout=2000');
-    if(!db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='account_observations'").get())return quotaPayload(null,now);
-    return quotaPayload(db.prepare('SELECT * FROM account_observations ORDER BY id DESC LIMIT 1').get(),now);
+    if(!db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='account_observations'").get())return empty();
+    const hasSource=db.prepare('PRAGMA table_info(account_observations)').all().some(column=>column.name==='observation_source_id');
+    const latest=observation.accounts.map(account=>{
+      const row=hasSource?db.prepare('SELECT * FROM account_observations WHERE observation_source_id=? ORDER BY id DESC LIMIT 1').get(account.id)
+        :account.id==='local'?db.prepare('SELECT *,\'local\' AS observation_source_id FROM account_observations ORDER BY id DESC LIMIT 1').get():null;
+      const identities=row?.account_key?(hasSource?db.prepare('SELECT account_key FROM account_observations WHERE observation_source_id=? AND account_key IS NOT NULL ORDER BY id DESC LIMIT 2').all(account.id)
+        :db.prepare('SELECT account_key FROM account_observations WHERE account_key IS NOT NULL ORDER BY id DESC LIMIT 2').all()):[];
+      const freshIdentity=!!row?.account_key&&!isStale(row.finished_at,now);
+      return {account,row,identityStatus:!row?.account_key?'unknown':identities[1]&&identities[1].account_key!==row.account_key?'changed':'observed',freshIdentity};
+    });
+    return {serverTime:new Date(now).toISOString(),defaultAccountId:observation.defaultAccountId,accounts:latest.map(current=>{
+      const payload=quotaPayload(current.row,now);
+      const sharedQuotaWith=current.freshIdentity?latest.filter(other=>other!==current&&other.freshIdentity&&other.row.account_key===current.row.account_key).map(other=>other.account.id):[];
+      return {id:current.account.id,label:current.account.label,planType:current.row?.plan_type??null,identityStatus:current.identityStatus,
+        sharedQuotaWith,observationId:current.row?.id??null,...payload};
+    })};
   } finally { db.close(); }
 }
 
-export function createDashboardServer({stateDirectory,assetDirectory,now=Date.now}) {
+export function createDashboardServer({stateDirectory,assetDirectory,observation=legacyObservation(),now=Date.now}) {
   const mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8',
     '.svg':'image/svg+xml','.png':'image/png','.ico':'image/x-icon','.woff2':'font/woff2'};
   const server=createServer(async(req,res)=>{
@@ -68,7 +92,13 @@ export function createDashboardServer({stateDirectory,assetDirectory,now=Date.no
     try {
       const url=new URL(req.url,`http://${req.headers.host}`);
       if(url.pathname==='/api/quota') {
-        const payload=readQuota(stateDirectory,now());
+        const all=readAccountsQuota(stateDirectory,observation,now());
+        const selected=all.accounts.find(account=>account.id===all.defaultAccountId)??all.accounts[0];
+        const {id,label,planType,identityStatus,sharedQuotaWith,observationId,...payload}=selected;
+        send(200,req.method==='HEAD'?'':JSON.stringify(payload));return;
+      }
+      if(url.pathname==='/api/accounts/quota') {
+        const payload=readAccountsQuota(stateDirectory,observation,now());
         send(200,req.method==='HEAD'?'':JSON.stringify(payload));return;
       }
       if(url.pathname.startsWith('/api/')) {send(404,JSON.stringify({error:'Not found'}));return;}

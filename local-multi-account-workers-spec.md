@@ -2,6 +2,8 @@
 
 Spécification fonctionnelle et technique — 12 septembre 2026.
 
+Première livraison ciblée : [T2.5 — Observation multi-compte locale](TRANCHE-2.5-SPEC.md), à implémenter avant T3/T4. Elle livre la surveillance simultanée sans changement du compte d'exécution ; les mécanismes de relais ci-dessous restent une extension ultérieure.
+
 Statut : demandé, à implémenter. Ce document complète la [spécification quota-aware](quota-aware-scheduling-spec.md). Il définit l'extension locale multi-compte ; il ne prétend pas que les tranches mono-worker en cours la livrent déjà. Lors de cette extension, les règles ci-dessous prévalent pour l'identité des comptes, leur sélection et le relais. Aucun protocole distant ni seconde installation de Codex n'est nécessaire.
 
 ## 1. Besoin et résultat attendu

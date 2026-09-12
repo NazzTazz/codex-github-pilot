@@ -9,6 +9,13 @@
   "publish": false,
   "githubAuth": "environment",
   "codexCommand": ["node", "C:/Users/trist/AppData/Roaming/npm/node_modules/@openai/codex/bin/codex.js"],
+  "observation": {
+    "defaultAccountId": "plus",
+    "accounts": [
+      {"id": "plus", "label": "Plus", "codexHome": "C:/Users/you/.codex-plus"},
+      {"id": "lite", "label": "Pro Lite", "codexHome": "C:/Users/you/.codex-pro-lite"}
+    ]
+  },
   "scheduling": {
     "enabled": false,
     "conserveAtPercent": 15,

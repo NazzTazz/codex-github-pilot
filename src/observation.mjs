@@ -9,11 +9,11 @@ const number = value => Number.isSafeInteger(value) && value >= 0 ? value : null
 
 // This client can only read account data. It never creates a thread or a model turn.
 export class ObservationClient {
-  constructor(command, {timeoutMs=30000, spawnProcess=spawn}={}) {
+  constructor(command, {timeoutMs=30000, spawnProcess=spawn,env=codexEnvironment()}={}) {
     this.pending = new Map(); this.nextId = 0; this.buffer = ''; this.decoder = new StringDecoder('utf8');
     this.timeoutMs = timeoutMs; this.failure = null;
     this.child = spawnProcess(command[0], [...command.slice(1), 'app-server', '--listen', 'stdio://'], {
-      env:codexEnvironment(), windowsHide:true, shell:false, detached:process.platform !== 'win32',
+      env:codexEnvironment(env), windowsHide:true, shell:false, detached:process.platform !== 'win32',
       stdio:['pipe','pipe','pipe']
     });
     this.closed = new Promise(resolve=>this.child.once('close',()=>{this.fail(new Error('Codex observation connection closed'));resolve();}));
@@ -109,26 +109,39 @@ export function tokenUsage(result) {
     })):null};
 }
 
-export async function collectObservation(config, store, {createClient=()=>new ObservationClient(config.codexCommand)}={}) {
+export function observationEnvironment(source,parent=process.env) {
+  const env=codexEnvironment(parent);
+  if(source?.codexHome)env.CODEX_HOME=source.codexHome;
+  return env;
+}
+
+export async function collectObservation(config, store, source=null, options={}) {
+  if(source?.createClient){options=source;source=null;}
+  source??={id:'local',label:'Codex',codexHome:null,scopeId:'local-codex-account'};
+  const env=observationEnvironment(source);
+  const createClient=options.createClient??(()=>new ObservationClient(config.codexCommand,{env}));
   const sample={started_at:new Date().toISOString(),finished_at:null,account_key:null,plan_type:null,
-    quota_observed_at:null,usage_observed_at:null,quota:null,usage:null,errors:{},source:'codex-app-server'};
+    quota_observed_at:null,usage_observed_at:null,quota:null,usage:null,errors:{},source:'codex-app-server',
+    observation_source_id:source.id,capacity_scope_id:source.scopeId};
   let client;
   try {
-    client=createClient();
+    client=createClient(source,env);
     await client.initialize();
     const auth=await client.request('account/read',{refreshToken:false});
     if (auth?.account?.type !== 'chatgpt') throw new Error('ChatGPT authentication required for observation');
     sample.plan_type=typeof auth.account.planType==='string'?auth.account.planType:null;
-    // Only a pseudonymous key is stored, never the account/read response or email.
+    // Keep the auth identity only in memory until quota confirms the account snapshot.
+    // A failed quota read must not replace the canonical provider key with an email key.
     const email=auth.account.email;
-    if (typeof email==='string' && email) sample.account_key=createHash('sha256').update('chatgpt:'+email.toLowerCase()).digest('hex');
+    const emailKey=typeof email==='string'&&email?createHash('sha256').update('chatgpt:'+email.toLowerCase()).digest('hex'):null;
     const results=await Promise.allSettled([
       client.request('account/rateLimits/read',{excludeResetCreditDetails:true}).then(result=>{
         const windows=quotaWindows(result);
         sample.quota_observed_at=new Date().toISOString();
         sample.quota={windows,ordinary_usage_allowed:typeof result.ordinaryUsageAllowed==='boolean'?result.ordinaryUsageAllowed:null,
           raw:result};
-        if(typeof result.accountId==='string' && result.accountId) sample.account_key=createHash('sha256').update('account:'+result.accountId).digest('hex');
+        sample.account_key=typeof result.accountId==='string'&&result.accountId
+          ?createHash('sha256').update('account:'+result.accountId).digest('hex'):emailKey;
       }),
       client.request('account/usage/read').then(result=>{
         sample.usage={...tokenUsage(result),raw:result};sample.usage_observed_at=new Date().toISOString();
@@ -143,9 +156,18 @@ export async function collectObservation(config, store, {createClient=()=>new Ob
   return sample;
 }
 
+export async function collectObservations(config,store,{createClient}={}) {
+  const sources=config.observation?.accounts??[{id:'local',label:'Codex',codexHome:null,scopeId:'local-codex-account'}];
+  const results=new Array(sources.length);let next=0;
+  const worker=async()=>{while(true){const index=next++;if(index>=sources.length)return;results[index]=await collectObservation(config,store,sources[index],{createClient});}};
+  await Promise.all(Array.from({length:Math.min(2,sources.length)},worker));
+  return results;
+}
+
 // Account-wide deltas are observations, never an attribution to the pilot's jobs.
 export function observationDelta(previous,current) {
-  if (!previous || !previous.account_key || previous.account_key!==current.account_key) return null;
+  if (!previous || (previous.observation_source_id??'local')!==(current.observation_source_id??'local')
+    || !previous.account_key || previous.account_key!==current.account_key) return null;
   const before=previous.usage?.lifetime_tokens,after=current.usage?.lifetime_tokens;
   const tokens=number(before)!==null && number(after)!==null && after>=before?after-before:null;
   const windows=(current.quota?.windows ?? []).map(window=>{

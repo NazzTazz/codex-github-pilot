@@ -246,3 +246,61 @@ Preuves vertes :
 - `git diff --check` : réussi, avertissements LF/CRLF connus uniquement.
 
 Aucun autre périmètre n'a été modifié. Aucun worker réel, appel GitHub, scheduler ou multi-compte introduit. Changements toujours non commités sur HEAD `8807986`.
+
+## Tranche 2.5 — observation multi-compte locale
+
+La tranche `TRANCHE-2.5-SPEC.md` est implémentée dans son périmètre d'observation. Le mode historique sans bloc `observation` conserve la source `local`, le scope `local-codex-account`, l'environnement hérité et `/api/quota`. Le nouveau mode explicite valide strictement `defaultAccountId` et les comptes, impose des identifiants et chemins absolus uniques, puis attribue le scope stable `codex-observation:<id>` à chaque source.
+
+La collecte lance au maximum deux clients app-server indépendants. Chaque processus enfant reçoit un environnement filtré propre et son seul `CODEX_HOME`; `process.env` n'est jamais modifié. Les résultats restent ordonnés selon la configuration et sont persistés indépendamment, y compris en cas d'échec ou de succès partiel. `observe --once` sauvegarde et affiche toutes les sources avant de retourner un code non nul si l'une d'elles n'est pas `ok`. Le mode watch conserve son verrou, son signal d'arrêt et ses cycles non superposés.
+
+La table `account_observations` reçoit la colonne additive `observation_source_id TEXT NOT NULL DEFAULT 'local'`. Les lectures par source sont paramétrées, les deltas exigent désormais la même source et le même `account_key`, et la projection dashboard prend le dernier relevé de chaque source configurée. Une ancienne base dépourvue de la colonne reste lisible comme `local` depuis l'API en lecture seule, sans migration HTTP. Les clés de compte restent privées; l'API n'expose que `identityStatus` et les IDs des autres sources partageant une identité fraîche.
+
+Le CLI ajoute `usage --account ID`. L'API ajoute `GET/HEAD /api/accounts/quota`; `/api/quota` continue de servir la source historique ou `defaultAccountId`. Le dashboard affiche toutes les cartes simultanément et rend toutes les enveloppes reçues par `limitId` et fenêtre, sans inventer de durée. Les quotas, tokens, erreurs, dates, changements d'identité et quotas partagés restent séparés par compte. Une réserve observée n'est jamais présentée comme une route d'exécution.
+
+Le README et `config.example.json` documentent deux profils Codex locaux. La procédure PowerShell limite `CODEX_HOME` à chaque connexion, configure `cli_auth_credentials_store = "file"`, utilise `codex login` puis `codex login status`, et restaure l'environnement dans `finally`. `codex login --help` a été exécuté avec la CLI installée : commande disponible, sans effectuer de connexion ni lire de credential.
+
+Preuves de validation réellement exécutées :
+
+- baseline avant T2.5 : `npm test`, **57/57 réussis** ;
+- recette ciblée multi-compte finale : **6/6 réussis**, incluant environnements isolés et fermeture des clients, historique entrelacé, projection, ancienne base en lecture seule, CLI ponctuel partiel, maintien du watch après erreur, arrêt propre et API HTTP ;
+- suite finale : `npm test`, **64/64 réussis** ;
+- `node --check` sur `src/observation-config.mjs`, `src/observation.mjs`, `src/store.mjs`, `src/cli.mjs`, `src/dashboard.mjs` et `test/multi-account-observation.test.mjs` : réussi ;
+- `npm run dashboard:build` : réussi, TypeScript et Vite verts ;
+- `git diff --check` : réussi, avec uniquement les avertissements de conversion LF/CRLF connus ;
+- contrôle visuel via `agent-browser` sur un serveur fixture temporaire distinct : cartes Plus et Pro Lite visibles simultanément, respectivement deux et quatre jauges, durées inconnues conservées, aucune erreur d'accessibilité détectée (**0 violation, 0 résultat incomplet**). Le serveur fixture et ses fichiers temporaires ont été arrêtés et supprimés.
+
+Les trois protections centrales ont aussi été éprouvées par mutations de copies temporaires, puis les copies ont été supprimées :
+
+1. environnement partagé entre sources : le test `two sources collect independently with isolated filtered environments and reverse completion` échoue, les deux clients recevant le même home ;
+2. suppression du contrôle de source dans les deltas : `interleaved histories and deltas stay within source and real identity` échoue avec un delta inter-compte de 800 tokens au lieu de `null` ;
+3. dernier relevé global utilisé pour chaque carte : `accounts quota projection keeps default stable, detects changed/shared identity, and hides identity` échoue avec les IDs `[3,3]` au lieu de `[2,3]`.
+
+L'immutabilité opérationnelle est couverte : aucun job, incident, override, `quotaPaused`, assignment ou environnement parent n'est modifié par la collecte. Aucun thread, génération, login/logout, catalogue de modèles, worker réel ou appel GitHub n'a été lancé. Le runner, l'admission et le scheduler n'ont pas été étendus.
+
+Limite de livraison : **implémentation validée avec fixtures** ne signifie pas **deux comptes personnels connectés**. `config.local.json`, `state/` et les credentials personnels n'ont pas été lus ou modifiés. La connexion réelle des deux profils reste l'étape utilisateur documentée. État Git : HEAD `8807986`, changements non commités conformément à la spec.
+
+## Corrections après contre-revue T2.5
+
+La contre-revue a identifié trois écarts de compatibilité et de robustesse. Les trois régressions ont été ajoutées avant les correctifs et exécutées ensemble. Preuve rouge initiale : **0/3 réussi, 3/3 échoués**.
+
+1. Lorsqu'une lecture quota échouait après `account/read`, l'observation persistait temporairement le hash de l'email alors que les succès utilisaient le hash de `accountId`. La source paraissait donc changer de compte pendant la panne puis au rétablissement. L'identité canonique est désormais attribuée uniquement après une réponse quota valide : `accountId` reste prioritaire, l'email pseudonymisé ne sert de repli que pour une réponse quota réussie sans identifiant fournisseur. Pendant la panne, l'identité vaut `null`/`unknown`; elle ne produit ni changement, ni partage certain, ni delta. Après rétablissement sur le même compte, l'état redevient `observed` et le partage entre sources réapparaît.
+2. `observe --once --json` sérialisait toujours le tableau interne. Le mode historique sans bloc `observation` renvoie de nouveau l'objet unique exact; seul le mode multi-compte renvoie un tableau.
+3. La procédure PowerShell remplaçait intégralement `config.toml`. Elle crée maintenant le fichier seulement s'il est absent. S'il existe, elle remplace uniquement la ligne `cli_auth_credentials_store` ou l'ajoute lorsqu'elle manque, en conservant toutes les autres options.
+
+Preuves après correction :
+
+- régressions ciblées `transient quota failure`, `documented profile setup` et `CLI observer has...` : **3/3 réussies** ;
+- suite complète : `npm test`, **66/66 réussis** ;
+- `node --check` sur les modules et tests corrigés : réussi ;
+- `npm run dashboard:build` : réussi ;
+- `git diff --check` : réussi, avertissements LF/CRLF connus uniquement.
+
+Ces corrections restent dans T2.5. Aucun changement du runner, du scheduler, de l'admission, de `quotaPaused` ou du compte d'exécution. Aucun compte personnel, credential ou service local n'a été manipulé.
+
+## Dernière correction T2.5 — configuration TOML et recette exécutée
+
+La modification documentaire précédente ajoutait le réglage en fin de fichier, donc dans la dernière section TOML éventuelle. Le README refuse désormais explicitement tout `config.toml` existant avant la connexion du profil et explique le réglage manuel à la racine. Seuls les profils neufs sont initialisés automatiquement.
+
+Le test textuel a été remplacé par l'exécution du bloc documentaire réel dans PowerShell, sur des dossiers temporaires. Deux configurations existantes (section MCP, réglage keyring, fins de ligne différentes) doivent être refusées et conservées octet pour octet. Un profil neuf doit recevoir exactement le réglage racine attendu. Aucune commande de connexion n'est exécutée par ce test. Il est explicitement ignoré hors Windows.
+
+Preuves exécutées : test ciblé rouge avant correction (0/1, configuration existante acceptée), vert après correction (1/1) ; suite complète 66/66, syntaxe du test et `git diff --check` réussis. Aucun compte personnel ni service modifié ; changements non commités.

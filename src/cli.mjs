@@ -10,9 +10,10 @@ import { poll } from './core.mjs';
 import { execute } from './process.mjs';
 import { checkAuth, createCodexExecutor } from './executors/codex.mjs';
 import { runJob, publishJob, githubToken } from './runner.mjs';
-import { collectObservation, observationDelta } from './observation.mjs';
+import { collectObservations, observationDelta } from './observation.mjs';
 import { createDashboardServer } from './dashboard.mjs';
 import { schedulingConfig } from './scheduling-config.mjs';
+import { observationConfig } from './observation-config.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 export async function loadConfig(file) {
@@ -28,6 +29,7 @@ export async function loadConfig(file) {
   config.stateDirectory = path.resolve(path.dirname(file),config.stateDirectory);
   config.checkout = path.resolve(path.dirname(file),config.checkout);
   config.scheduling = schedulingConfig(config.scheduling);
+  config.observation = observationConfig(config.observation,path.dirname(file));
   return config;
 }
 export async function lock(directory) {
@@ -78,7 +80,7 @@ async function main() {
     const assets=path.join(root,'dashboard','dist');
     if(!existsSync(path.join(assets,'index.html')))throw new Error('Build the dashboard first: npm run dashboard:build');
     const release=await lock(path.join(config.stateDirectory,'dashboard'));
-    const server=createDashboardServer({stateDirectory:config.stateDirectory,assetDirectory:assets});
+    const server=createDashboardServer({stateDirectory:config.stateDirectory,assetDirectory:assets,observation:config.observation});
     let timer;
     const stop=()=>{clearInterval(timer);server.close();server.closeIdleConnections();};
     try {
@@ -117,13 +119,20 @@ async function main() {
   if(command==='usage') {
     try {
       const limitIndex=args.indexOf('--limit');
-      const rows=store.observations(limitIndex<0?100:Number(args[limitIndex+1]));
-      if(args.includes('--json'))console.log(JSON.stringify(rows.map((row,i)=>({...row,delta:observationDelta(rows[i-1],row)})),null,2));
+      const limit=limitIndex<0?100:Number(args[limitIndex+1]),accountIndex=args.indexOf('--account');
+      const accountId=accountIndex<0?null:args[accountIndex+1];
+      if(accountId!==null&&!config.observation.accounts.some(account=>account.id===accountId))throw new Error('Unknown observation account');
+      let rows=accountId?store.observationsBySource(accountId,limit):config.observation.mode==='multi'
+        ?store.latestObservations(config.observation.accounts.map(account=>account.id)).filter(Boolean):store.observations(limit);
+      const previous=new Map();
+      rows=rows.map(row=>{const key=row.observation_source_id??'local',delta=observationDelta(previous.get(key),row);previous.set(key,row);return {...row,delta};});
+      if(args.includes('--json'))console.log(JSON.stringify(rows,null,2));
       else if(!rows.length)console.log('No account observations yet. Run: node src/cli.mjs observe');
       else {
-        console.table(rows.map((row,i)=>({id:row.id,at:row.finished_at,status:row.status,lifetime_tokens:row.usage?.lifetime_tokens ?? null,
-          account_tokens_delta:observationDelta(rows[i-1],row)?.account_tokens_delta ?? null,errors:JSON.stringify(row.errors)})));
-        printObservation(rows.at(-1));
+        console.table(rows.map(row=>({source:row.observation_source_id,id:row.id,at:row.finished_at,status:row.status,lifetime_tokens:row.usage?.lifetime_tokens ?? null,
+          account_tokens_delta:row.delta?.account_tokens_delta ?? null,errors:JSON.stringify(row.errors)})));
+        if(config.observation.mode==='multi'&&!accountId)for(const row of rows)printObservation(row,config.observation.accounts.find(account=>account.id===row.observation_source_id));
+        else printObservation(rows.at(-1),config.observation.accounts.find(account=>account.id===(rows.at(-1).observation_source_id??'local')));
       }
     } finally {store.close();}return;
   }
@@ -139,9 +148,10 @@ async function main() {
       if(existsSync(observationStopFile))await unlink(observationStopFile);
       process.on('SIGINT',stop);process.on('SIGTERM',stop);
       do {
-        const sample=await collectObservation(config,store);
-        if(args.includes('--json'))console.log(JSON.stringify(sample));else printObservation(sample);
-        if(!args.includes('--watch')) {if(sample.status!=='ok')process.exitCode=1;break;}
+        const samples=await collectObservations(config,store);
+        if(args.includes('--json'))console.log(JSON.stringify(config.observation.mode==='legacy'?samples[0]:samples));
+        else for(const sample of samples)printObservation(sample,config.observation.accounts.find(account=>account.id===sample.observation_source_id));
+        if(!args.includes('--watch')) {if(samples.some(sample=>sample.status!=='ok'))process.exitCode=1;break;}
         for(let elapsed=0;elapsed<interval && !stopping;elapsed++) {
           if(existsSync(observationStopFile)){stopping=true;break;}
           await new Promise(resolve=>setTimeout(resolve,1000));
@@ -218,8 +228,8 @@ async function main() {
     } while (!stopping);
   } finally { store.close(); await release(); }
 }
-function printObservation(sample) {
-  console.log(`Account observation #${sample.id} ${sample.finished_at}: ${sample.status}; plan=${sample.plan_type ?? 'unknown'}`);
+function printObservation(sample,source=null) {
+  console.log(`Account ${source?.label??sample.observation_source_id??'Codex'} [${sample.observation_source_id??'local'}] observation #${sample.id} ${sample.finished_at}: ${sample.status}; plan=${sample.plan_type ?? 'unknown'}`);
   if(sample.quota) {
     console.table(sample.quota.windows.map(w=>({bucket:w.limit_id,window:w.window,remaining_percent:w.remaining_percent,
       window_minutes:w.window_minutes,resets_at:w.resets_at===null?null:new Date(w.resets_at*1000).toISOString()})));

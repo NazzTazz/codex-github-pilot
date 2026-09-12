@@ -1,0 +1,19 @@
+.quota-accounts { min-width:0; }
+.accounts-quota-grid { display:grid; grid-template-columns:minmax(0,1fr); gap:12px; margin-top:16px; }
+.account-quota { --account-accent:#46745d; border:1px solid #e4ebe7; border-radius:9px; padding:14px; background:#fcfdfc; min-width:0; }
+.account-degraded { --account-accent:#996019; border-color:#edc993; background:#fff7e9; }
+.account-exhausted { --account-accent:#a74442; border-color:#e5b0ac; background:#fff0ef; }
+.account-heading { display:flex; justify-content:space-between; gap:8px; align-items:center; margin-bottom:12px; }
+.account-heading h3 { font-size:14px; }
+.account-state { color:var(--account-accent); font-size:10px; text-align:right; }
+.account-quota .quota-meters { margin-top:0; gap:10px; }
+.account-quota .meter-heading { margin-bottom:5px; font-size:10px; }
+.account-quota .meter-heading strong { color:var(--account-accent); font-size:10px; }
+.account-quota [data-slot=progress-indicator] { background:var(--account-accent)!important; }
+.account-details { margin-top:12px; border-top:1px solid #0000000d; padding-top:9px; }
+.account-details>summary { cursor:pointer; color:var(--account-accent); font-size:11px; }
+.account-details>summary:focus-visible { outline:2px solid var(--account-accent); outline-offset:4px; }
+.account-details p { font-size:10px; line-height:1.6; margin-top:10px; color:#647069; }
+.account-details .account-tokens { margin-top:12px; padding-top:12px; }
+.account-details dl>div { display:flex; justify-content:space-between; gap:8px; font-size:10px; margin-top:6px; }
+.account-details dd { margin:0; }

@@ -149,5 +149,7 @@ test('CLI observer has its own lock and stop signal, and leaves the job queue un
   assert.notEqual(duplicate.code,0);assert.match(duplicate.stderr,/lock unavailable/);
   const stop=await execute(process.execPath,[cli,'stop-observe','--config',configFile]);
   assert.equal(stop.code,0);assert.equal(await closed,0);
+  const once=await execute(process.execPath,[cli,'observe','--once','--json','--config',configFile]);
+  assert.equal(once.code,0,once.stderr);assert.equal(Array.isArray(JSON.parse(once.stdout)),false);
   assert.deepEqual(store.jobs(),[]);assert.equal(store.get('firstStarted'),undefined);assert.equal(store.get('quotaPaused'),undefined);
 });

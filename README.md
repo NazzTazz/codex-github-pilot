@@ -127,6 +127,8 @@ n'est copié : le processus Codex utilise sa connexion existante.
   longs ou une pause de quota. Aucun démarrage automatique Windows n'est installé.
 - `node src/cli.mjs usage` lit les relevés enregistrés ; `usage --json --limit 100`
   expose les 100 derniers relevés et leurs variations, du plus ancien au plus récent.
+- Avec plusieurs sources configurées, `usage --account ID --json --limit 100`
+  filtre une source. Sans filtre, `usage` présente le dernier état de chaque source.
 - `node src/cli.mjs metrics` reste consacré aux tokens des tentatives du pilote.
 
 SQLite conserve les relevés successifs dans `account_observations`, y compris
@@ -138,6 +140,55 @@ n'est pas additionnée à la vue multi-enveloppes qui la contient déjà.
 lorsqu'ils sont disponibles. Les réponses de ces deux lectures sont conservées
 pour inspection locale ; la réponse d'identité et l'email ne sont pas sauvegardés.
 Une empreinte de compte sépare les comparaisons entre comptes.
+
+### Observer plusieurs comptes locaux
+
+Le bloc optionnel `observation` de `config.example.json` associe un identifiant et
+un libellé à chaque dossier `CODEX_HOME`. Les chemins doivent être absolus et se
+trouver hors du dépôt. Ils servent uniquement aux processus d'observation : le
+compte par défaut choisit la lecture `/api/quota` de compatibilité et ne change
+jamais le compte utilisé par le runner.
+
+Créer puis connecter les profils séquentiellement dans PowerShell, sans `setx` et
+sans modifier la session Codex du terminal courant :
+
+```powershell
+$profiles = @(
+  @{ Name = 'Plus'; Home = "$env:USERPROFILE/.codex-plus" },
+  @{ Name = 'Pro Lite'; Home = "$env:USERPROFILE/.codex-pro-lite" }
+)
+foreach ($profile in $profiles) {
+  New-Item -ItemType Directory -Force -Path $profile.Home | Out-Null
+  $configPath = Join-Path $profile.Home 'config.toml'
+  $credentialSetting = 'cli_auth_credentials_store = "file"'
+  if (Test-Path -LiteralPath $configPath) {
+    throw "Codex config already exists: $configPath. Configure credential storage manually before login."
+  }
+  [IO.File]::WriteAllText($configPath, $credentialSetting + [Environment]::NewLine)
+  $previousCodexHome = $env:CODEX_HOME
+  try {
+    $env:CODEX_HOME = $profile.Home
+    Write-Host "Connexion du profil $($profile.Name)"
+    codex login
+    codex login status
+  } finally {
+    if ($null -eq $previousCodexHome) { Remove-Item Env:CODEX_HOME -ErrorAction SilentlyContinue }
+    else { $env:CODEX_HOME = $previousCodexHome }
+  }
+}
+```
+
+Choisir le compte attendu dans le navigateur ; deux profils navigateur distincts
+évitent les confusions. Ne pas déplacer ni copier un `auth.json` existant. Une
+seule installation de Codex CLI est utilisée, puis l'observateur ouvre au plus
+deux lectures concurrentes avec un environnement enfant isolé par source. Une
+erreur sur un compte n'annule pas les mesures de l'autre.
+
+Cette procédure initialise des profils neufs. Si `config.toml` existe déjà, elle
+s'arrête sans le modifier ni lancer la connexion de ce profil. Pour réutiliser ce
+profil, configurer manuellement `cli_auth_credentials_store = "file"` à la racine
+TOML, avant toute section `[ ... ]`, en préservant les autres options ; exécuter
+ensuite seulement le bloc de connexion `try/finally` avec le dossier choisi.
 
 Un jour absent ou un champ inconnu reste inconnu. Les totaux journaliers peuvent
 arriver en retard : ils ne sont jamais additionnés d'un relevé à l'autre.

@@ -10,3 +10,5 @@ export type QuotaResponse = {
   usage:null|{observedAt:string;stale:boolean;lifetimeTokens:number|null;peakDailyTokens:number|null;
     dailyBuckets:null|{date:string|null;tokens:number|null}[]};
 };
+export type AccountQuota = QuotaResponse & {id:string;label:string;planType:string|null;identityStatus:'unknown'|'observed'|'changed';sharedQuotaWith:string[];observationId:number|null};
+export type AccountsQuotaResponse = {serverTime:string;defaultAccountId:string;accounts:AccountQuota[]};
