@@ -2,6 +2,8 @@
 
 Révision 2 — 11 septembre 2026. Destinataires : Sol et les mainteneurs.
 
+Amendement normatif du 12 septembre 2026 après T2.5 : les sections 10.3, 10.4, 10.8 et 10.9 ci-dessous intègrent l'observation multi-compte livrée et la vue compacte demandée. Les mentions de périmètre mono-compte désignent désormais une seule cible d'exécution, pas une seule source observée. La section 10.11 fixe les contrôles supplémentaires avant livraison de T3/T4. Ne pas réimplémenter T2.5.
+
 Extension demandée le 12 septembre : [deux workers Codex CLI avec comptes locaux isolés](local-multi-account-workers-spec.md). Elle spécifie les jauges par worker et le relais Lite → Plus après alerte sous 10 % et décision utilisateur. Le périmètre mono-worker ci-dessous reste celui des tranches en cours ; l'extension précise ses propres règles de priorité et critères de livraison.
 
 Base du code inspecté : `8807986`. Le scheduler quota-aware n'est pas encore implémenté. Ce document remplace la première spécification et prévaut sur les recommandations immédiates de [la note distribuée](distributed-capacity-architecture-note.md). La section 10 est le contrat d'implémentation ; les sections précédentes expliquent les arbitrages.
@@ -265,6 +267,12 @@ Registre : sol-medium = gpt-5.6-sol/medium ; sol-high = gpt-5.6-sol/high ; astra
 
 Cible construite depuis config : id local-codex, provider openai, adapter codex-exec, capacityScopeId local-codex-account, offeredProfiles configurés. IDs locaux à la base, pas identifiants globaux de contributeur. Pas de worker UUID, offer ID indépendant ou endpoint. Modèle détecté mais non offert ≠ candidat.
 
+Après T2.5, cette valeur de scope reste le défaut historique seulement. Ajouter `scheduling.observationSourceId` optionnel : omission en mode observation legacy résout `local` ; avec observation multi-compte et scheduling activé, une source explicite configurée est obligatoire. Valeur présente non chaîne, vide ou inconnue rejetée. Ne jamais déduire la cible de `observation.defaultAccountId`, du plan, de l'ordre des cartes ou du dernier relevé global.
+
+Ce choix est une liaison statique explicite de la cible d'exécution à une source. Scheduling activé : auth, contrôle d'identité, catalogue et executor doivent utiliser le `CODEX_HOME` de cette source dans leur environnement enfant filtré. Source legacy : environnement hérité. Scheduling désactivé : conserver exactement l'environnement d'exécution historique, même si plusieurs sources sont observées. Documenter cet effet avant activation ; ne pas modifier la configuration personnelle pendant l'implémentation. Aucun relais automatique ni sélection de plusieurs cibles dans T3/T4.
+
+Séparer `observationSourceId` (provenance de collecte), scope de source T2.5 (`codex-observation:<id>`) et identité canonique du quota fournisseur. Les requêtes de relevés filtrent source et scope configurés. Les incidents sont associés au compte pseudonyme canonique et au pool : renommer une source ou viser le même compte depuis un autre dossier ne doit pas contourner un incident. Plusieurs sources du même compte ne multiplient jamais la capacité. Garder les scopes historiques lisibles sans réattribuer les anciennes tentatives.
+
 Bloc optionnel, valeurs par défaut :
 
 ```json
@@ -290,10 +298,14 @@ Buckets/alias sont des constantes de l'adaptateur testées : main codex, semaine
 
 `readCapacity(store, scopeId, now)` lit la dernière observation du scope ; `capacityFromObservation(row, now, maxAge)` est pure. Résultat : observationId/scopeId/observedAt/validUntil, quality fresh/missing/stale/invalid/account-mismatch, permission ordinaire tri-état, fenêtres main/reserve, contrôle de dépense, catalogue et identité pseudonyme locale. Aucun mode.
 
+Adapter le contrat à T2.5 : `readCapacity(store, {observationSourceId, scopeId, expectedAccountKey}, now)`. Il lit le dernier relevé de la source et vérifie son scope et son identité ; il ne cherche pas un ancien succès pour masquer une erreur récente. `expectedAccountKey` provient d'une lecture fraîche en lecture seule de l'identité du compte d'exécution, dans le même environnement que l'executor, avant admission ; aucune comparaison de hash email avec hash d'ID fournisseur. Employer le même schéma canonique des deux côtés, sinon qualité inconnue et report. Une panne de quota produit une identité inconnue comme dans T2.5, pas un changement de compte déduit de l'email. Identité explicitement différente → `account-mismatch` ; identité manquante → capacité non admissible.
+
+Revalider cette liaison après les lectures GitHub et avant lancement, avec les contrôles atomiques de 10.6. Changement de source/configuration pendant la préparation → réévaluation, jamais mutation d'un assignment commencé. Cette protection n'est pas une garantie contre une modification externe des credentials après le dernier contrôle ; conserver la limite documentée et les artifacts en cas d'échec.
+
 Règles :
 
 1. Map multi-bucket préférée au legacy dupliqué. Legacy admis seulement si limitId identifie main. Jamais le premier bucket par défaut.
-2. Semaine par durée 10080 dans primary ou secondary ; absence/ambiguïté → inconnu/invalide. Restant = max(0,100-usedPercent) si entier non négatif, sinon null.
+2. Semaine principale par durée 10080 dans primary ou secondary du seul bucket main `codex` ; absence/ambiguïté → inconnu/invalide. Ne pas sélectionner une weekly Reserve/Spark à sa place. Restant = max(0,100-usedPercent) si entier non négatif, sinon null.
 3. Fenêtre présente inconnue empêche de déclarer le pool disponible ; zéro le bloque. Secondary absente n'est pas une erreur.
 4. Validité jusqu'au minimum âge maximal/reset des fenêtres concernées ; âge égal au maximum périmé. Date future de plus de 5 s/invalide → invalide. Reset passé exige nouvelle lecture, pas calcul de récupération.
 5. Dernier quota en erreur interdit de recycler un succès antérieur. Panne des seuls tokens n'invalide pas le quota réussi.
@@ -301,7 +313,11 @@ Règles :
 7. spendControlReached null initial n'est pas bloquant à lui seul avec permission vraie ; après true, garder l'incident jusqu'à false explicite.
 8. Catalogue et quota associés au même compte ; ne pas combiner différents comptes. Worker/observateur utilisent le même environnement Codex. Changer de connexion hors Pilot impose arrêt/redémarrage et nouvelles observations ; V1 ne verrouille pas cette opération externe.
 
+Plus expose actuellement main 5 h + weekly ; Pro Lite expose main weekly, réserve Luna, Spark 5 h et Spark globale. L'absence de main 5 h sur Lite est normale, pas une preuve manquante. Les fenêtres Spark restent visibles mais n'entrent ni dans l'admission Sol/Terra/Astra, ni dans la phase économique main. Une réserve Luna positive ne rend pas Sol disponible. Durées et resets viennent des relevés, jamais du seul libellé de plan.
+
 Si scheduling activé, ajouter model/list paginé avec includeHidden=true dans chaque collecte. Auth d'abord ; quota/usage/catalogue ensuite parallèles. Projection limitée aux modèles/efforts, date, compte et version d'implémentation connue dans capabilities_json. Aucun cache indépendant ni thread/turn. Catalogue en erreur : admissions activées attendent la preuve de disponibilité du profil candidat. Désactivé : collecte actuelle inchangée.
+
+« Chaque collecte » concerne ici la source liée à la cible d'exécution. Réutiliser le cycle multi-source T2.5 et ses clients isolés ; les autres sources continuent leur observation sans catalogue requis et leurs erreurs ne bloquent pas la cible choisie. Ne pas remplacer le collecteur par une boucle mono-compte ni démarrer un observateur supplémentaire dans le worker.
 
 Reserve candidate seulement si option activée, relevé frais, bucket positif sans limite atteinte, normalModelSlug=gpt-5.6-luna, alias gpt-reserve et medium au catalogue du même compte, aucun incident Reserve et aucun contrôle de dépense main explicitement atteint. Spark hors policy. Sélection Reserve exige ordinaryUsageAllowed=false ; zéro main avec permission true est contradictoire, pas un feu vert.
 
@@ -382,6 +398,8 @@ Migrations additives/idempotentes, aucune réécriture des anciennes demandes :
 
 Model_requested signifie demandé ; reasoning_effort garde le sens historique effort envoyé. Anciennes lectures : effectif=model_effective ?? model_requested ; effort demandé=effort_requested ?? reasoning_effort. Identités anciennes null/legacy-local. Model_observed reste null sans événement fiable ; effectif veut dire configuré, pas prouvé à distance.
 
+La colonne `account_observations.observation_source_id` est déjà livrée par T2.5 : la conserver et réutiliser ses lectures. Inclure l'ID de source et le scope dans les nouvelles décisions/assignments et leur fingerprint ; persister la liaison canonique au compte dans l'audit local pour les incidents. Ni chemin d'authentification ni clé de compte dans les projections HTTP. Ne pas fabriquer ces identités pour l'historique.
+
 Decision JSON version 1 : demande/rôle fonctionnel/classe/source, demandé résolu, cible/profils offerts, policyVersion codex-local-v1, hash config canonique, scope/relevé, phase/mode, faits utiles/motifs, override, assignment ou null. Aucun compte brut, email, credential ou prompt intégral. Entrée détaillée du run locale, jamais HTTP.
 
 Fingerprint de report : demande/classification, action/motif, mode, hash policy/offre, override et nature des restrictions ; exclure horloge/ID observation/fluctuations sans effet. Admission toujours nouvelle ligne avec relevé exact. Aucun worker_run pour invalid/deferred ; préparation échouée reste visible avec session null. Remettre deferred_since à null à l'admission ; historique conservé.
@@ -398,7 +416,11 @@ Projection : enabled, targetId/provider, serverTime, policyVersion/hash, observa
 
 Compteurs avant troncature : mechanicalReadyJobs = implementation mechanical + contrat valide ; deferredJobs = reports prévisionnels ; deferredPremiumJobs = reports économiques de travaux nécessitant Sol/Astra, hors erreurs/unclassified. « Luna-ready » peut rester libellé Codex du premier.
 
-Conserver les quatre pourcentages en blocs puis quatre jauges pleine largeur de quota restant, sans sélection ; nombre de fenêtres dynamique. Ajouter mode de la cible locale, plafond et exception : premium Astra ; conserve Terra + Sol complex ; survival Luna + préparation Sol ; reserve Luna Reserve. Inconnu/bloqué → plafond inconnu. Ce résumé n'est pas une règle universelle.
+Conserver la vue compacte livrée après T2.5 : quotas dans la colonne de la vue d'ensemble, toutes les cartes de comptes visibles, jauges dynamiques sans blocs de pourcentages redondants, détails et tokens repliés par défaut sous « Voir les détails ». Carte normale si disponible, orange si dégradée/incertaine, rouge lorsque les pools observés sont épuisés ; conserver un libellé accessible. Cette couleur est un résumé des quotas observés, pas une autorisation d'exécution ni un mode de scheduling calculé côté React.
+
+Ajouter le mode de scheduling uniquement à la cible liée explicitement : premium/conserve/survival/reserve ou inconnu/bloqué, plafond et exceptions issus de `/api/scheduling`. Distinguer compte observé et compte utilisé par l'exécution. Ne pas afficher un mode global qui semblerait s'appliquer à toutes les cartes. Ne pas réintroduire la pleine largeur ou les blocs de pourcentages supprimés.
+
+Réutiliser `/api/accounts/quota` et le contrat legacy `/api/quota` de T2.5. `/api/scheduling` fournit `observationSourceId` et `observationId` de sa propre cible : `/api/quota` peut montrer un autre compte par défaut et ne doit pas servir à valider ses décisions. Comparer les dates/IDs uniquement à la carte de la source correspondante. Aucun endpoint existant ne change de forme implicitement.
 
 Disabled, unknown, stale et réserve observée non activée distincts. Si observationId des deux API diffère, afficher leurs dates respectives. Tokens indépendants. Cartes métier de démonstration inchangées.
 
@@ -425,3 +447,18 @@ Validation : npm test, npm run dashboard:build, contrôle visuel avec fixtures c
 Compatibilités : allowlist humaine, activation explicite, polling/déduplication, profils historiques, policy désactivée par défaut, auth ChatGPT sans API fallback, reviewer frais, checkout conservé, publication optionnelle/idempotente, aucun push/fusion par worker, erreurs et consommation des tentatives conservées. Aucun reclassement rétroactif.
 
 Ordre : extraction mécanique executor et tests existants ; métadonnées/profils/migrations ; capacité/policy pures ; admission/incidents/overrides ; dashboard/docs. L'extraction seule ne change pas le comportement. Livraison complète = ces cinq lots ; ACP et distribué n'en sont pas des critères d'acceptation.
+
+### 10.11 Recette supplémentaire après T2.5 — T3/T4
+
+Les fondations et l'observation multi-compte sont déjà livrées. Construire les prochains lots sur ces interfaces ; les specs de tranche dérivées doivent citer cet amendement.
+
+- Configuration multi-compte, source d'exécution absente ou inconnue : activation refusée ; changement de `defaultAccountId` sans effet sur la cible choisie.
+- Source Lite sélectionnée, carte Plus par défaut : capacité/catalogue/auth/executor utilisent tous Lite. Capturer les environnements enfants pour le prouver ; aucune mutation de l'environnement parent.
+- Compte attendu différent ou inconnu, relevé périmé, panne quota suivie de récupération : report sans génération ; aucun faux changement d'identité ni reprise sur ancienne observation.
+- Plus 5 h épuisée mais weekly positive : main bloqué. Lite main weekly positive sans main 5 h : admissible si les autres preuves sont présentes. Spark épuisé ne bloque pas Sol ; réserve positive ne débloque pas Sol.
+- Source observée non sélectionnée en panne : la cible saine continue. Deux sources du même compte ne doublent pas le quota et ne permettent pas de contourner un incident existant.
+- Changement de source ou identité avant spawn : affectation réévaluée/refusée, aucun lancement sur l'ancien relevé. Une tentative commencée conserve sa provenance.
+- UI : le mode du scheduler se rattache à la bonne carte ; cartes compactes et détails repliés conservés ; API legacy inchangée.
+- Mutations en copie isolée : utiliser le compte par défaut au lieu de la source d'exécution, enlever le contrôle d'identité, prendre la weekly Spark pour main. Les tests doivent échouer sur ces défauts, puis passer avec le code correct.
+
+La sélection automatique de compte, l'alerte de relais sous 10 % et la reprise inter-compte restent hors de T3/T4. Ils nécessiteront leur propre chantier ; aucune contrainte de continuité multi-compte ne doit être annoncée comme déjà implémentée.
