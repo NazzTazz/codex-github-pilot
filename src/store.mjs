@@ -119,6 +119,11 @@ export class Store {
     const statement=this.db.prepare('SELECT * FROM account_observations WHERE observation_source_id=? ORDER BY id DESC LIMIT 1');
     return sourceIds.map(id=>{const row=statement.get(id);return row?this.#observation(row):null;});
   }
+  latestObservation(sourceId) {
+    if(typeof sourceId!=='string'||!sourceId)throw new Error('Invalid observation source');
+    const row=this.db.prepare('SELECT * FROM account_observations WHERE observation_source_id=? ORDER BY id DESC LIMIT 1').get(sourceId);
+    return row?this.#observation(row):null;
+  }
   #observation(row) {
     const {quota_json,usage_json,errors_json,capabilities_json,...fields}=row;
     return {...fields,quota:quota_json===null?null:JSON.parse(quota_json),usage:usage_json===null?null:JSON.parse(usage_json),errors:JSON.parse(errors_json),

@@ -76,6 +76,13 @@ offerts par la cible Codex locale. Il est désactivé par défaut : ces valeurs 
 alors validées et auditées, sans dégradation de modèle, report automatique ou
 changement du comportement historique.
 
+Avec plusieurs comptes observés, `scheduling.observationSourceId` lie explicitement
+la future cible d'exécution à une source. Il est obligatoire avant d'activer la
+policy et ne dépend pas de `observation.defaultAccountId`. Une collecte activée lit
+le catalogue de modèles uniquement pour cette source, dans son `CODEX_HOME` isolé.
+T3 calcule seulement les décisions quota-aware ; leur admission dans la file reste
+désactivée jusqu'à T4, et la configuration personnelle n'est jamais modifiée.
+
 ## Résultats et publication
 
 Par défaut `publish: false` : résultats locaux uniquement. Une publication se

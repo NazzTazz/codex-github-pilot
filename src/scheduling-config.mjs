@@ -2,9 +2,10 @@ import { profiles } from './core.mjs';
 
 export const schedulingDefaults=Object.freeze({enabled:false,conserveAtPercent:15,survivalBelowPercent:5,
   maxObservationAgeSeconds:180,quotaErrorCooldownSeconds:300,survivalPlanTimeoutMinutes:10,
-  offeredProfiles:Object.freeze(['sol-medium','sol-high','astra-low','terra-medium','luna-medium']),reserveEnabled:false});
+  offeredProfiles:Object.freeze(['sol-medium','sol-high','astra-low','terra-medium','luna-medium']),reserveEnabled:false,
+  observationSourceId:null});
 
-export function schedulingConfig(value) {
+export function schedulingConfig(value,observation=null) {
   const input=value===undefined?{}:value;
   if(!input || typeof input!=='object' || Array.isArray(input))throw new Error('Invalid scheduling configuration');
   const allowed=new Set(Object.keys(schedulingDefaults));
@@ -20,10 +21,21 @@ export function schedulingConfig(value) {
     || !Array.isArray(result.offeredProfiles)||!result.offeredProfiles.length
     || Array.from(result.offeredProfiles).some(name=>typeof name!=='string'||!Object.hasOwn(profiles,name))
     || new Set(result.offeredProfiles).size!==result.offeredProfiles.length
+    || (result.observationSourceId!==null&&(typeof result.observationSourceId!=='string'||!result.observationSourceId.trim()))
     || (result.reserveEnabled&&(!result.enabled||!result.offeredProfiles.includes('luna-medium')))) throw new Error('Invalid scheduling configuration');
+  if(observation) {
+    if(result.enabled&&observation.mode==='multi'&&result.observationSourceId===null)throw new Error('Scheduling requires an explicit observation source');
+    if(result.observationSourceId!==null&&!observation.accounts.some(account=>account.id===result.observationSourceId))throw new Error('Unknown scheduling observation source');
+    if(result.enabled&&observation.mode==='legacy'&&result.observationSourceId===null)result.observationSourceId='local';
+  }
   return result;
 }
 
 export function localCodexTarget(config) {
-  return {id:'local-codex',provider:'openai',adapter:'codex-exec',capacityScopeId:'local-codex-account',offeredProfiles:[...config.scheduling.offeredProfiles]};
+  const scheduling=config.scheduling??schedulingConfig();
+  const source=scheduling.enabled&&config.observation
+    ?config.observation.accounts.find(account=>account.id===scheduling.observationSourceId):null;
+  return {id:'local-codex',provider:'openai',adapter:'codex-exec',
+    ...(config.observation?{observationSourceId:source?.id??'local'}:{}),capacityScopeId:source?.scopeId??'local-codex-account',
+    offeredProfiles:[...scheduling.offeredProfiles]};
 }

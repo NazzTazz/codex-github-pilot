@@ -25,11 +25,11 @@ export async function githubToken(config) {
   return password; // In memory only, never written to configuration or logs.
 }
 export function staticAssignment(job, execution, config) {
-  const target=localCodexTarget({scheduling:config.scheduling ?? schedulingConfig()});
+  const target=localCodexTarget({scheduling:config.scheduling ?? schedulingConfig(),observation:config.observation});
   const effectiveProfile=job.profile ?? Object.entries(profiles)
     .find(([,profile])=>profile.model===execution.model && profile.effort===execution.effort)?.[0] ?? null;
   return {version:1,routing:'static',targetId:target.id,provider:target.provider,adapter:target.adapter,
-    capacityScopeId:target.capacityScopeId,requestedProfile:job.profile ?? null,effectiveProfile,
+    observationSourceId:target.observationSourceId,capacityScopeId:target.capacityScopeId,requestedProfile:job.profile ?? null,effectiveProfile,
     requestedModel:execution.model,requestedEffort:execution.effort,model:execution.model,effort:execution.effort,
     sandbox:execution.sandbox,timeoutMs:config.timeoutMinutes*60000,adapterVersion:null,quotaPool:null,
     decisionId:null,observationId:null,overrideId:null,policyVersion:null,policyHash:null,mode:null,reason:'static-profile'};

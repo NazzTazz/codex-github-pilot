@@ -28,8 +28,8 @@ export async function loadConfig(file) {
     || !['environment','git-credential',undefined].includes(config.githubAuth)) throw new Error('Invalid configuration; see config.example.json');
   config.stateDirectory = path.resolve(path.dirname(file),config.stateDirectory);
   config.checkout = path.resolve(path.dirname(file),config.checkout);
-  config.scheduling = schedulingConfig(config.scheduling);
   config.observation = observationConfig(config.observation,path.dirname(file));
+  config.scheduling = schedulingConfig(config.scheduling,config.observation);
   return config;
 }
 export async function lock(directory) {

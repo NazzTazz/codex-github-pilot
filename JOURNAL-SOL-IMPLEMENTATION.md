@@ -304,3 +304,12 @@ La modification documentaire précédente ajoutait le réglage en fin de fichier
 Le test textuel a été remplacé par l'exécution du bloc documentaire réel dans PowerShell, sur des dossiers temporaires. Deux configurations existantes (section MCP, réglage keyring, fins de ligne différentes) doivent être refusées et conservées octet pour octet. Un profil neuf doit recevoir exactement le réglage racine attendu. Aucune commande de connexion n'est exécutée par ce test. Il est explicitement ignoré hors Windows.
 
 Preuves exécutées : test ciblé rouge avant correction (0/1, configuration existante acceptée), vert après correction (1/1) ; suite complète 66/66, syntaxe du test et `git diff --check` réussis. Aucun compte personnel ni service modifié ; changements non commités.
+
+## Corrections directes après contre-recette T3 — 12 septembre 2026
+
+Les deux P2 restants ont été corrigés à la demande de l'utilisateur :
+
+- Le scheduler accepte un override valide sur son propre profil, déjà contrôlé par la policy. L'absence de Terra dans l'offre ou le catalogue ne bloque plus un override Sol valide. Les contraintes techniques et les états expiré, révoqué ou consommé restent bloquants.
+- La fraîcheur globale décrit l'âge du relevé ; les resets invalident séparément main et réserve. Un reset main dépassé ne rend plus une réserve fraîche inutilisable. Chaque pool expose son `validUntil` (minimum âge/reset), distinct de celui du relevé et du catalogue. L'admission T4 reste hors périmètre.
+
+Preuve rouge avant modification du code : les deux nouvelles régressions échouaient (0/2). Après correction : suite complète **75/75**, tests T3 **8/8**, dont les refus supplémentaires pour override inactif et catalogue périmé en réserve. Syntaxe des deux modules corrigés et `git diff --check` réussis (avertissements LF/CRLF habituels). Aucun worker réel, compte personnel ou service modifié. Changements non commités.

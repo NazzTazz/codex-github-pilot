@@ -53,6 +53,19 @@ test('successful snapshots are append-only and do not resume quota or modify job
   assert.equal(store.observations(1)[0].id,second.id);
   assert.throws(()=>store.observations(-1),/limit/);
 });
+test('quota signals are read from their provider buckets',async t=>{
+  const {store}=fixture(t);
+  const bucketQuota={accountId:'account-fixture',ordinaryUsageAllowed:false,rateLimits:{},rateLimitsByLimitId:{
+    codex:{primary:{usedPercent:100,windowDurationMins:10080,resetsAt:1790000000},spendControlReached:true},
+    base_model_inference:{primary:{usedPercent:20,windowDurationMins:10080,resetsAt:1790000000},normalModelSlug:'gpt-5.6-luna'}
+  }};
+  const sample=await collectObservation({scheduling:{enabled:true,observationSourceId:'local'}},store,{createClient:()=>fakeClient({
+    'account/rateLimits/read':()=>bucketQuota,
+    'model/list':()=>({data:[{slug:'gpt-reserve',supportedReasoningEfforts:['medium']}]})
+  })});
+  assert.equal(sample.quota.spend_control_reached,true);
+  assert.equal(sample.quota.normal_model_slug,'gpt-5.6-luna');
+});
 test('an unavailable usage endpoint preserves successful quota; failures remain separate observations',async t=>{
   const {store}=fixture(t);
   const sample=await collectObservation({},store,{createClient:()=>fakeClient({'account/usage/read':()=>{throw new Error('Method unavailable');}})});

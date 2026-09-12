@@ -18,6 +18,7 @@
   },
   "scheduling": {
     "enabled": false,
+    "observationSourceId": "lite",
     "conserveAtPercent": 15,
     "survivalBelowPercent": 5,
     "maxObservationAgeSeconds": 180,

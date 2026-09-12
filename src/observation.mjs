@@ -3,9 +3,11 @@ import { StringDecoder } from 'node:string_decoder';
 import { createHash } from 'node:crypto';
 import { codexEnvironment } from './process.mjs';
 
-const readMethods = new Set(['initialize','account/read','account/rateLimits/read','account/usage/read']);
+const readMethods = new Set(['initialize','account/read','account/rateLimits/read','account/usage/read','model/list']);
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const number = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
+const MAIN_LIMIT = 'codex';
+const RESERVE_LIMIT = 'base_model_inference';
 
 // This client can only read account data. It never creates a thread or a model turn.
 export class ObservationClient {
@@ -101,6 +103,11 @@ export function quotaWindows(result) {
   });
 }
 
+function quotaBucket(result,limitId) {
+  if(object(result.rateLimitsByLimitId))return object(result.rateLimitsByLimitId[limitId])?result.rateLimitsByLimitId[limitId]:null;
+  return object(result.rateLimits)&&result.rateLimits.limitId===limitId?result.rateLimits:null;
+}
+
 export function tokenUsage(result) {
   if (!object(result) || !object(result.summary)) throw new Error('Invalid account token response');
   return {lifetime_tokens:number(result.summary.lifetimeTokens),peak_daily_tokens:number(result.summary.peakDailyTokens),
@@ -115,6 +122,32 @@ export function observationEnvironment(source,parent=process.env) {
   return env;
 }
 
+function catalogueModels(result) {
+  const values=Array.isArray(result?.data)?result.data:Array.isArray(result?.models)?result.models:null;
+  if(!values)throw new Error('Invalid Codex model catalogue');
+  return values.map(model=>{
+    const slug=model?.slug??model?.model??model?.id;
+    const rawEfforts=model?.supportedReasoningEfforts??model?.reasoningEfforts??[];
+    const efforts=Array.isArray(rawEfforts)?rawEfforts.map(value=>typeof value==='string'?value:value?.effort).filter(value=>typeof value==='string'):[];
+    return typeof slug==='string'&&slug?{slug,efforts:[...new Set(efforts)]}:null;
+  }).filter(Boolean);
+}
+
+async function readCatalogue(client,implementation) {
+  const models=[];let cursor;const seen=new Set();
+  do {
+    const result=await client.request('model/list',{includeHidden:true,...(cursor?{cursor}:{})});
+    models.push(...catalogueModels(result));
+    const next=typeof result.nextCursor==='string'&&result.nextCursor?result.nextCursor:null;
+    if(next&&seen.has(next))throw new Error('Invalid Codex model catalogue pagination');
+    if(next)seen.add(next);cursor=next;
+  } while(cursor&&seen.size<100);
+  if(cursor)throw new Error('Codex model catalogue has too many pages');
+  const unique=new Map(models.map(model=>[model.slug,model]));
+  return {observed_at:new Date().toISOString(),account_key:null,models:[...unique.values()],
+    implementation:implementation?{name:implementation.name??null,version:implementation.version??null}:null};
+}
+
 export async function collectObservation(config, store, source=null, options={}) {
   if(source?.createClient){options=source;source=null;}
   source??={id:'local',label:'Codex',codexHome:null,scopeId:'local-codex-account'};
@@ -126,7 +159,7 @@ export async function collectObservation(config, store, source=null, options={})
   let client;
   try {
     client=createClient(source,env);
-    await client.initialize();
+    const initialized=await client.initialize();
     const auth=await client.request('account/read',{refreshToken:false});
     if (auth?.account?.type !== 'chatgpt') throw new Error('ChatGPT authentication required for observation');
     sample.plan_type=typeof auth.account.planType==='string'?auth.account.planType:null;
@@ -134,11 +167,15 @@ export async function collectObservation(config, store, source=null, options={})
     // A failed quota read must not replace the canonical provider key with an email key.
     const email=auth.account.email;
     const emailKey=typeof email==='string'&&email?createHash('sha256').update('chatgpt:'+email.toLowerCase()).digest('hex'):null;
-    const results=await Promise.allSettled([
+    const catalogueEnabled=config.scheduling?.enabled&&config.scheduling.observationSourceId===source.id;
+    const requests=[
       client.request('account/rateLimits/read',{excludeResetCreditDetails:true}).then(result=>{
         const windows=quotaWindows(result);
+        const main=quotaBucket(result,MAIN_LIMIT),reserve=quotaBucket(result,RESERVE_LIMIT);
         sample.quota_observed_at=new Date().toISOString();
         sample.quota={windows,ordinary_usage_allowed:typeof result.ordinaryUsageAllowed==='boolean'?result.ordinaryUsageAllowed:null,
+          normal_model_slug:typeof reserve?.normalModelSlug==='string'?reserve.normalModelSlug:null,
+          spend_control_reached:typeof main?.spendControlReached==='boolean'?main.spendControlReached:null,
           raw:result};
         sample.account_key=typeof result.accountId==='string'&&result.accountId
           ?createHash('sha256').update('account:'+result.accountId).digest('hex'):emailKey;
@@ -146,8 +183,11 @@ export async function collectObservation(config, store, source=null, options={})
       client.request('account/usage/read').then(result=>{
         sample.usage={...tokenUsage(result),raw:result};sample.usage_observed_at=new Date().toISOString();
       })
-    ]);
-    results.forEach((result,i)=>{if(result.status==='rejected')sample.errors[i===0?'quota':'usage']=result.reason.message;});
+    ];
+    if(catalogueEnabled)requests.push(readCatalogue(client,initialized?.serverInfo??initialized?.agentInfo??null).then(value=>{sample.capabilities=value;}));
+    const results=await Promise.allSettled(requests);
+    results.forEach((result,i)=>{if(result.status==='rejected')sample.errors[i===0?'quota':i===1?'usage':'catalogue']=result.reason.message;});
+    if(sample.capabilities)sample.capabilities.account_key=sample.account_key;
   } catch(error) { sample.errors.connection=error.message; }
   finally { if(client)try {await client.close();} catch {sample.errors.shutdown='Codex observer shutdown failed';} }
   sample.finished_at=new Date().toISOString();
