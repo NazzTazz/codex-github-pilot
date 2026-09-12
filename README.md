@@ -52,14 +52,17 @@ Chaque tâche peut choisir explicitement son profil modèle/effort en première 
 Implémente la spécification et vérifie les cas limites.
 ```
 
-Profils disponibles pour chacun des rôles : `sol-medium`, `sol-high`, `astra-low`.
+Profils disponibles pour chacun des rôles : `sol-medium`, `sol-high`, `astra-low`,
+`terra-medium` et `luna-medium`. Le profil interne `luna-reserve-medium` ne peut
+pas être demandé depuis GitHub.
 Le profil remplace le modèle et l'effort par défaut, sans changer les consignes du
 rôle. Il est conservé dans la file ; les métriques enregistrent le modèle et
 l'effort demandés. Modifier le profil du commentaire après sa mise en file annule
 le job : poster une nouvelle commande pour demander un autre profil.
 
 Rôles et valeurs par défaut : `sol-implement` (Sol medium, écriture dans la copie isolée), `sol-review`
-(Sol medium), `astra-review` (Astra low). Les trois rôles utilisent le sandbox
+(Sol medium), `astra-review` (Astra low) et `sol-plan` (Sol medium, planification
+sur issue ou PR, sans modification suivie ni création de sous-job). Les rôles utilisent le sandbox
 `workspace-write` dans une copie isolée. Les reviewers peuvent installer les
 dépendances et écrire des tests temporaires ; tout changement de fichier suivi
 ou de HEAD invalide leur résultat. Ils ne corrigent pas la branche examinée. Les deux
@@ -67,6 +70,11 @@ revues exigent une PR du même dépôt, pour examiner un SHA sans ambiguïté. U
 implémentation sur issue part de la branche par défaut distante ; sur PR, de sa tête.
 Le corps de l'issue/PR porte la spec ou son chemin. Le pilote ne transmet pas
 l'historique de conversation de l'implémenteur au reviewer.
+
+Le bloc optionnel `scheduling` de la configuration décrit les seuils et profils
+offerts par la cible Codex locale. Il est désactivé par défaut : ces valeurs sont
+alors validées et auditées, sans dégradation de modèle, report automatique ou
+changement du comportement historique.
 
 ## Résultats et publication
 

@@ -8,5 +8,15 @@
   "stateDirectory": "state",
   "publish": false,
   "githubAuth": "environment",
-  "codexCommand": ["node", "C:/Users/trist/AppData/Roaming/npm/node_modules/@openai/codex/bin/codex.js"]
+  "codexCommand": ["node", "C:/Users/trist/AppData/Roaming/npm/node_modules/@openai/codex/bin/codex.js"],
+  "scheduling": {
+    "enabled": false,
+    "conserveAtPercent": 15,
+    "survivalBelowPercent": 5,
+    "maxObservationAgeSeconds": 180,
+    "quotaErrorCooldownSeconds": 300,
+    "survivalPlanTimeoutMinutes": 10,
+    "offeredProfiles": ["sol-medium", "sol-high", "astra-low", "terra-medium", "luna-medium"],
+    "reserveEnabled": false
+  }
 }

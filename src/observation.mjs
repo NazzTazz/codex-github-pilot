@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import { createHash } from 'node:crypto';
-import { agentEnvironment } from './runner.mjs';
+import { codexEnvironment } from './process.mjs';
 
 const readMethods = new Set(['initialize','account/read','account/rateLimits/read','account/usage/read']);
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -13,7 +13,7 @@ export class ObservationClient {
     this.pending = new Map(); this.nextId = 0; this.buffer = ''; this.decoder = new StringDecoder('utf8');
     this.timeoutMs = timeoutMs; this.failure = null;
     this.child = spawnProcess(command[0], [...command.slice(1), 'app-server', '--listen', 'stdio://'], {
-      env:agentEnvironment(), windowsHide:true, shell:false, detached:process.platform !== 'win32',
+      env:codexEnvironment(), windowsHide:true, shell:false, detached:process.platform !== 'win32',
       stdio:['pipe','pipe','pipe']
     });
     this.closed = new Promise(resolve=>this.child.once('close',()=>{this.fail(new Error('Codex observation connection closed'));resolve();}));

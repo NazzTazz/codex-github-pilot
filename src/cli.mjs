@@ -7,9 +7,12 @@ import { fileURLToPath } from 'node:url';
 import { Store } from './store.mjs';
 import { GitHub } from './github.mjs';
 import { poll } from './core.mjs';
-import { checkAuth, execute, runJob, publishJob, githubToken } from './runner.mjs';
+import { execute } from './process.mjs';
+import { checkAuth, createCodexExecutor } from './executors/codex.mjs';
+import { runJob, publishJob, githubToken } from './runner.mjs';
 import { collectObservation, observationDelta } from './observation.mjs';
 import { createDashboardServer } from './dashboard.mjs';
+import { schedulingConfig } from './scheduling-config.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 export async function loadConfig(file) {
@@ -24,6 +27,7 @@ export async function loadConfig(file) {
     || !['environment','git-credential',undefined].includes(config.githubAuth)) throw new Error('Invalid configuration; see config.example.json');
   config.stateDirectory = path.resolve(path.dirname(file),config.stateDirectory);
   config.checkout = path.resolve(path.dirname(file),config.checkout);
+  config.scheduling = schedulingConfig(config.scheduling);
   return config;
 }
 export async function lock(directory) {
@@ -35,6 +39,27 @@ export async function lock(directory) {
     server.listen({host:'127.0.0.1',port,exclusive:true},resolve);
   });
   return () => new Promise((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
+}
+export async function runClaimedJob(config,store,github,job,baseDirectory,dependencies={}) {
+  const run=dependencies.runJob || runJob;
+  const publish=dependencies.publishJob || publishJob;
+  const attempt=await run(config,store,github,job,baseDirectory,dependencies.runner);
+  if(config.publish && store.job(job.id).status==='completed') {
+    try {await publish(config,store,github,store.job(job.id));}
+    catch(error) {
+      const current=store.job(job.id);
+      store.update(job.id,{status:current.status==='publishing'?'publishing':'failed',error:error.message});
+      throw error;
+    }
+    finally {
+      if(attempt) {
+        const current=store.job(job.id);
+        store.telemetry(attempt.runId,{finished_at:new Date().toISOString(),total_ms:Math.round(performance.now()-attempt.jobStart),
+          run_status:current.status,run_error:current.error});
+      }
+    }
+  }
+  return attempt;
 }
 async function main() {
   const args = process.argv.slice(2);
@@ -167,6 +192,7 @@ async function main() {
     if (existsSync(stopFile)) await unlink(stopFile);
     await checkAuth(config);
     if (config.publish && !github.token) throw new Error('Set GITHUB_TOKEN before enabling publication');
+    const executor=createCodexExecutor(config,{schemaPath:path.join(root,'result.schema.json')});
     store.recover();
     do {
       try {
@@ -177,7 +203,11 @@ async function main() {
         if (existsSync(stopFile)) stopping=true;
         if (!stopping && store.get('quotaPaused') !== 'yes') {
           const job = store.claim();
-          if (job) { console.log(`Running job ${job.id}: ${job.role} #${job.issue}`); await runJob(config,store,github,job,root); console.log(`Job ${job.id}: ${store.job(job.id).status}`); }
+          if (job) {
+            console.log(`Running job ${job.id}: ${job.role} #${job.issue}`);
+            await runClaimedJob(config,store,github,job,root,{runner:{executor}});
+            console.log(`Job ${job.id}: ${store.job(job.id).status}`);
+          }
         }
       } catch (error) { console.error(error.message); }
       if (args.includes('--once')) break;

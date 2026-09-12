@@ -1,50 +1,16 @@
-import { spawn } from 'node:child_process';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { openSync, writeSync, closeSync } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { executionFor, active, permitted, parseCommand, promptFor, validateResult } from './core.mjs';
-import { Telemetry } from './telemetry.mjs';
+import { roles, profiles, executionFor, active, permitted, parseCommand, promptFor, validateResult } from './core.mjs';
+import { execute, codexEnvironment, agentEnvironment } from './process.mjs';
+import { createCodexExecutor, checkAuth, codexArgs } from './executors/codex.mjs';
+import { specificationHash } from './task-classification.mjs';
+import { localCodexTarget, schedulingConfig } from './scheduling-config.mjs';
 
-export function agentEnvironment(source = process.env) {
-  const env = {...source};
-  for (const key of Object.keys(env)) {
-    if (/^(OPENAI_.*|CODEX_API_KEY|GITHUB_TOKEN|GH_TOKEN|GIT_ASKPASS|SSH_ASKPASS)$/i.test(key)) delete env[key];
-  }
-  return env;
-}
-export async function execute(command, args, options = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {cwd:options.cwd, env:options.env || process.env,
-      windowsHide:true, shell:false, detached:process.platform !== 'win32', stdio:['pipe','pipe','pipe']});
-    if(child.pid)options.onSpawn?.(child.pid);
-    let stdout = '', stderr = '', timedOut = false, killFallback;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      if (process.platform === 'win32') {
-        const killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], {windowsHide:true, stdio:'ignore'});
-        killer.on('error',()=>child.kill('SIGKILL'));
-        killFallback = setTimeout(()=>{child.kill('SIGKILL');killer.kill();},2000);
-      }
-      else { try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); } }
-    }, options.timeoutMs || 60000);
-    child.stdout.on('data', data => { stdout = (stdout + data).slice(-2000000); options.onStdout?.(data); });
-    child.stderr.on('data', data => { stderr = (stderr + data).slice(-200000); options.onStderr?.(data); });
-    child.on('error', error => { clearTimeout(timer); reject(error); });
-    child.on('close', code => { clearTimeout(timer); clearTimeout(killFallback); resolve({code,stdout,stderr,timedOut}); });
-    child.stdin.on('error', () => {});
-    child.stdin.end(options.input || '');
-  });
-}
+export { execute, agentEnvironment, checkAuth, codexArgs };
 async function gitCommand(args, cwd) {
-  const result = await execute('git', args, {cwd, env:{...agentEnvironment(), GIT_TERMINAL_PROMPT:'0'}});
+  const result = await execute('git', args, {cwd, env:{...codexEnvironment(), GIT_TERMINAL_PROMPT:'0'}});
   if (result.code !== 0) throw new Error(`Git command failed: ${args[0]}\n${result.stderr}`);
   return result.stdout.trim();
-}
-export async function checkAuth(config) {
-  const result = await execute(config.codexCommand[0], [...config.codexCommand.slice(1), 'login', 'status'], {env:agentEnvironment()});
-  if (result.code !== 0 || !/Logged in using ChatGPT/i.test(result.stdout + result.stderr)) {
-    throw new Error('ChatGPT login not confirmed. Run codex login status in the same Windows account. API fallback is disabled.');
-  }
 }
 export async function githubToken(config) {
   if (process.env.GITHUB_TOKEN || process.env.GH_TOKEN) return process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
@@ -58,33 +24,58 @@ export async function githubToken(config) {
   if (!password) throw new Error('Git credential helper returned no usable credential');
   return password; // In memory only, never written to configuration or logs.
 }
-export function codexArgs(config, job, directory, output, schema) {
-  const role = executionFor(job);
-  return [...config.codexCommand.slice(1), '-a', 'never',
-    'exec', '--ignore-user-config', '--ephemeral', '--json', '--model', role.model,
-    '-c', `model_reasoning_effort="${role.effort}"`, '-c', 'model_provider="openai"',
-    '--sandbox', role.sandbox, '--cd', directory,
-    '--output-schema', schema, '--output-last-message', output, '-'];
+export function staticAssignment(job, execution, config) {
+  const target=localCodexTarget({scheduling:config.scheduling ?? schedulingConfig()});
+  const effectiveProfile=job.profile ?? Object.entries(profiles)
+    .find(([,profile])=>profile.model===execution.model && profile.effort===execution.effort)?.[0] ?? null;
+  return {version:1,routing:'static',targetId:target.id,provider:target.provider,adapter:target.adapter,
+    capacityScopeId:target.capacityScopeId,requestedProfile:job.profile ?? null,effectiveProfile,
+    requestedModel:execution.model,requestedEffort:execution.effort,model:execution.model,effort:execution.effort,
+    sandbox:execution.sandbox,timeoutMs:config.timeoutMinutes*60000,adapterVersion:null,quotaPool:null,
+    decisionId:null,observationId:null,overrideId:null,policyVersion:null,policyHash:null,mode:null,reason:'static-profile'};
+}
+export function executionInput(config, job, issue, sha, runId, taskMetadata = null) {
+  const role=roles[job.role];
+  const prompt=promptFor(job,issue,sha,taskMetadata);
+  return {version:1,jobId:job.id,runId,repository:config.repository,revision:sha,requestedRole:job.role,
+    functionalRole:role.functionalRole,title:issue.title,
+    specification:issue.body,request:job.request,instructions:roles[job.role].instruction,
+    requirements:{workspaceWrite:role.sandbox==='workspace-write',mayChangeTrackedFiles:role.mayChangeTrackedFiles,
+      trackedFilesMustRemainUnchanged:!role.mayChangeTrackedFiles},
+    taskClass:job.task_class || 'unclassified',taskMetadata,executionContract:taskMetadata?.executionContract ?? null,
+    reportSchema:{name:'result.schema.json'},prompt};
 }
 export async function runJob(config, store, github, job, baseDirectory, dependencies = {}) {
   const git = dependencies.git || gitCommand;
   const authenticate = dependencies.authenticate || checkAuth;
-  const run = dependencies.execute || execute;
   const jobStart=performance.now();
   const execution=executionFor(job);
-  const runId=store.startRun(job.id,execution.model,execution.effort);
+  const assignment=staticAssignment(job,execution,config);
+  const executor=dependencies.executor || createCodexExecutor(config,{run:dependencies.execute || execute,
+    schemaPath:path.join(baseDirectory,'result.schema.json')});
+  const runId=store.startRun(job.id,assignment,null);
+  const attempt=()=>({runId,jobStart,status:store.job(job.id).status});
   try {
     const issue = await github.issue(job.issue);
     const comment = await github.request(`/issues/comments/${job.comment_id}`);
     const command = parseCommand(comment.body);
-    if (!active(issue, config) || !permitted(comment, config) || command?.role !== job.role || command?.request !== job.request || (command?.profile ?? null) !== (job.profile ?? null)) {
-      store.update(job.id, {status:'cancelled', error:'Thread paused/closed or request changed'}); return;
+    const persistedMetadata=job.task_metadata_json ?? null;
+    const currentMetadata=command?.taskMetadata===null||command?.taskMetadata===undefined?null:JSON.stringify(command.taskMetadata);
+    const classificationChanged=command && (command.classificationError!==null
+      || command.taskClass!==(job.task_class || 'unclassified') || currentMetadata!==persistedMetadata);
+    if (!active(issue, config) || !permitted(comment, config) || command?.role !== job.role || command?.request !== job.request
+      || (command?.profile ?? null) !== (job.profile ?? null) || classificationChanged) {
+      store.update(job.id, {status:'cancelled', error:'Thread paused/closed or request/classification changed'}); return attempt();
+    }
+    if(job.specification_hash && specificationHash(issue)!==job.specification_hash) {
+      store.update(job.id,{status:'cancelled',error:'Issue specification changed after queueing'});return attempt();
     }
     const pr = issue.pull_request ? await github.pr(job.issue) : null;
     if (pr && (pr.head.repo?.full_name?.toLowerCase() !== config.repository.toLowerCase() || pr.state !== 'open')) {
       throw new Error('Only open same-repository PRs are supported');
     }
-    if (job.role !== 'sol-implement' && !pr) throw new Error('Counter-review requires a PR with an explicit head commit');
+    const role=roles[job.role];
+    if (role.requiresPr && !pr) throw new Error('This role requires a PR with an explicit head commit');
     await authenticate(config);
     const directory = path.join(config.stateDirectory, 'runs', String(job.id));
     const checkout = path.join(directory, 'checkout');
@@ -100,47 +91,39 @@ export async function runJob(config, store, github, job, baseDirectory, dependen
     if (pr && sha !== pr.head.sha) throw new Error('PR changed while preparing checkout; retry with a new request');
     await git(['checkout','-b',`pilot/job-${job.id}`,sha], checkout);
     store.update(job.id, {sha});
-    const output = path.join(directory,'result.json');
-    await writeFile(path.join(directory,'task.txt'),promptFor(job,issue,sha));
-    const stdout = openSync(path.join(directory,'events.jsonl'),'w');
-    const stderr = openSync(path.join(directory,'stderr.log'),'w');
-    const workerStart=performance.now();
-    store.telemetry(runId,{worker_started_at:new Date().toISOString(),preparation_ms:Math.round(workerStart-jobStart)});
-    const telemetry=new Telemetry(snapshot=>store.telemetry(runId,snapshot));
-    let result;
-    try {
-      result = await run(config.codexCommand[0], codexArgs(config,job,checkout,output,path.join(baseDirectory,'result.schema.json')), {
-        cwd:checkout, env:agentEnvironment(), input:promptFor(job,issue,sha),
-        timeoutMs:config.timeoutMinutes * 60000,
-        onStdout:data => {writeSync(stdout,data);telemetry.feed(data);}, onStderr:data => writeSync(stderr,data),
-        onSpawn:pid=>store.telemetry(runId,{pid})
-      });
-    } finally {
-      telemetry.end();
-      store.telemetry(runId,{worker_ms:Math.round(performance.now()-workerStart),exit_code:result?.code ?? null,timed_out:result ? Number(result.timedOut) : null});
-      closeSync(stdout);closeSync(stderr);
+    const taskMetadata=job.task_metadata_json?JSON.parse(job.task_metadata_json):null;
+    const input=executionInput(config,job,issue,sha,runId,taskMetadata);
+    store.setRunInput(runId,input);
+    await writeFile(path.join(directory,'task.txt'),input.prompt);
+    const outcome=await executor.execute(input,assignment,{workspacePath:checkout,outputDirectory:directory,onEvent:event=>{
+      if(event.type==='worker-started')store.telemetry(runId,{worker_started_at:event.at,preparation_ms:Math.round(performance.now()-jobStart)});
+      if(event.type==='spawned')store.telemetry(runId,{pid:event.pid});
+      if(event.type==='telemetry')store.telemetry(runId,event.snapshot);
+      if(event.type==='worker-finished')store.telemetry(runId,{worker_ms:event.workerMs,exit_code:event.exitCode,timed_out:event.timedOut});
+    }});
+    store.telemetry(runId,{worker_ms:outcome.workerMs,exit_code:outcome.exitCode ?? null,timed_out:Number(!!outcome.timedOut),
+      ...outcome.telemetry});
+    if(outcome.status==='interrupted') {store.update(job.id,{status:'interrupted',error:outcome.error.message});return attempt();}
+    if(outcome.status!=='completed') {
+      const quota=outcome.error?.kind==='quota';
+      if(quota)store.set('quotaPaused','yes');
+      store.update(job.id,{status:quota?'quota_wait':'failed',error:outcome.error?.message || 'Codex execution failed'});
+      return attempt();
     }
-    if (result.timedOut) { store.update(job.id,{status:'interrupted',error:'Timeout; inspect preserved checkout before another request'}); return; }
-    if (result.code !== 0) {
-      const quota = /usage limit|quota|rate.limit|limit reached|try again at/i.test(result.stderr + result.stdout);
-      if (quota) store.set('quotaPaused','yes');
-      store.update(job.id,{status:quota ? 'quota_wait' : 'failed',error:quota ? 'Quota unavailable; retry explicitly when available' : 'Codex failed; see local stderr.log'}); return;
-    }
-    const value = validateResult(JSON.parse(await readFile(output,'utf8')));
+    const value=validateResult(outcome.report);
     if (await git(['rev-parse','HEAD'],checkout) !== sha) throw new Error('Agent changed HEAD; inspect the preserved checkout');
     const changes = await git(['status','--porcelain'],checkout);
     await writeFile(path.join(directory,'changes.txt'),changes);
     await writeFile(path.join(directory,'changes.patch'),await git(['diff','--binary','HEAD'],checkout));
-    if (job.role !== 'sol-implement' && await git(['status','--porcelain','--untracked-files=no'],checkout)) throw new Error('Reviewer changed tracked files; result is not accepted');
+    if (!role.mayChangeTrackedFiles && await git(['status','--porcelain','--untracked-files=no'],checkout)) throw new Error('Role changed tracked files; result is not accepted');
     store.update(job.id,{status:'completed',result:JSON.stringify(value)});
-    if (config.publish) await publishJob(config,store,github,store.job(job.id));
   } catch (error) {
-    const current = store.job(job.id);
-    store.update(job.id,{status:current.status === 'publishing' ? 'publishing' : 'failed',error:error.message});
+    store.update(job.id,{status:'failed',error:error.message});
   } finally {
     const current=store.job(job.id);
     store.telemetry(runId,{finished_at:new Date().toISOString(),total_ms:Math.round(performance.now()-jobStart),run_status:current.status,run_error:current.error});
   }
+  return attempt();
 }
 export async function publishJob(config,store,github,job) {
   if (!['completed','publishing'].includes(job.status)) throw new Error('Job has no publishable result');
