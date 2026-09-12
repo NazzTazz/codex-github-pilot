@@ -13,7 +13,7 @@ export function policyHash(config,target) {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
 
-function phaseFor(remaining,config) {
+export function phaseFor(remaining,config) {
   if(!Number.isSafeInteger(remaining))return null;
   if(remaining>config.conserveAtPercent)return 'premium';
   if(remaining>=config.survivalBelowPercent)return 'conserve';
@@ -32,11 +32,49 @@ function requestedProfileOf(requested) {
   return Object.entries(profiles).find(([,profile])=>profile.model===requested?.model&&profile.effort===requested?.effort)?.[0]??null;
 }
 
-function minimumCompatible(requirements,requestedProfile) {
+export function minimumCompatible(requirements,requestedProfile) {
   if(requirements.requestedRole==='astra-review')return requestedProfile==='astra-low';
   const minimum=requirements.functionalRole==='specification'||['complex','exploratory'].includes(requirements.taskClass)?2
     :requirements.functionalRole==='review'||requirements.taskClass==='routine'||requirements.taskClass==='mechanical'&&!requirements.mechanicalContract?1:0;
   return rank[requestedProfile]!==undefined&&rank[requestedProfile]>=minimum;
+}
+
+export function requiresPremiumProfile(requirements) {
+  return requirements.requestedRole==='astra-review'||requirements.functionalRole==='specification'
+    ||requirements.taskClass==='complex'||requirements.taskClass==='exploratory';
+}
+
+export function codexPolicySummary(capacity,target,config,{legacyPaused=false,incidents=[]}={}) {
+  if(!config.enabled)return {weeklyPhase:null,mode:null,recommendedCeiling:null,exceptions:[],blockingReasons:legacyPaused?['legacy-quota-pause']:[]};
+  const weeklyPhase=phaseFor(capacity.main.weeklyRemainingPercent,config);
+  const mainIncident=incidents.some(row=>row.quota_pool==='main'),reserveIncident=incidents.some(row=>row.quota_pool==='reserve');
+  const mainAvailable=capacity.quality==='fresh'&&capacity.ordinaryUsageAllowed===true&&capacity.spendControlReached!==true
+    &&capacity.main.available===true&&!mainIncident;
+  const reserveAvailable=config.reserveEnabled&&capacity.quality==='fresh'&&capacity.ordinaryUsageAllowed===false
+    &&capacity.spendControlReached!==true&&capacity.reserve.available===true&&!reserveIncident
+    &&capacity.normalModelSlug===codexCapacityConstants.normalLunaModel&&target.offeredProfiles.includes('luna-medium')
+    &&hasModel(capacity,'luna-reserve-medium');
+  const blockingReasons=[];
+  if(legacyPaused)blockingReasons.push('legacy-quota-pause');
+  if(capacity.quality==='missing')blockingReasons.push('quota-missing');
+  else if(capacity.quality==='stale')blockingReasons.push('quota-stale');
+  else if(capacity.quality==='account-mismatch')blockingReasons.push('account-mismatch');
+  else if(capacity.quality!=='fresh')blockingReasons.push('quota-invalid');
+  if(capacity.quality==='fresh'&&!capacity.catalogue.available)blockingReasons.push('model-unavailable');
+  if(capacity.spendControlReached===true)blockingReasons.push('spend-control');
+  if(mainIncident&&capacity.ordinaryUsageAllowed===true||reserveIncident&&capacity.ordinaryUsageAllowed===false)blockingReasons.push('quota-incident');
+  let mode=mainAvailable?weeklyPhase:reserveAvailable?'reserve':capacity.quality==='fresh'&&capacity.catalogue.available?'blocked':'unknown';
+  if(capacity.quality==='fresh'&&!capacity.catalogue.available)mode='unknown';
+  if(legacyPaused)mode='blocked';
+  if(mode==='blocked'&&!blockingReasons.length)blockingReasons.push(capacity.ordinaryUsageAllowed===false?'ordinary-unavailable':'reserve-unavailable');
+  const technicallyBlocked=blockingReasons.length>0||!['premium','conserve','survival','reserve'].includes(mode);
+  const recommendedCeiling=technicallyBlocked?null:mode==='premium'?'requested':mode==='conserve'?'sol-medium'
+    :mode==='survival'?'luna-medium':'luna-reserve-medium';
+  const exceptions=mode==='premium'?['mechanical-contract-luna']
+    :mode==='conserve'?['routine-terra','mechanical-contract-luna','exploratory-deferred','astra-deferred']
+    :mode==='survival'?['sol-plan-sol-medium']
+    :mode==='reserve'?['mechanical-contract-only']:[];
+  return {weeklyPhase,mode,recommendedCeiling,exceptions,blockingReasons:[...new Set(blockingReasons)]};
 }
 
 function economicProfile(requirements,requestedProfile,mode) {

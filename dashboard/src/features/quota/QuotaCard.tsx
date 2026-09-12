@@ -2,6 +2,9 @@ import { AlertCircle, RefreshCw, Zap } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { useQuota } from './useQuota';
+import { useScheduling } from '../scheduling/useScheduling';
+import { SchedulingBadge,SchedulingDialog } from '../scheduling/SchedulingPanel';
+import type { SchedulingResponse } from '../scheduling/types';
 import type { AccountQuota, QuotaWindow } from './types';
 import './quota.css';
 import './accounts.css';
@@ -46,12 +49,13 @@ function WindowMeter({window}:{window:QuotaWindow}) {
     <div className="quota-caption"><span>Reset : {dateTime(window.resetsAt)}</span></div>
   </div>;
 }
-function AccountPanel({account,networkError}:{account:AccountQuota;networkError:boolean}) {
+function AccountPanel({account,networkError,scheduling,schedulingError}:{account:AccountQuota;networkError:boolean;scheduling:SchedulingResponse|null;schedulingError:boolean}) {
   const quota=account.quota,usage=account.usage,state=accountState(account,networkError);
   const windows=[...(quota?.windows??[])].sort((a,b)=>Number(b.limitId==='codex')-Number(a.limitId==='codex')||(a.limitId??'').localeCompare(b.limitId??'')||(a.window??'').localeCompare(b.window??''));
   const days=[...(usage?.dailyBuckets??[])].filter(day=>day.date!==null).sort((a,b)=>a.date!.localeCompare(b.date!));
   return <article className={`account-quota account-${state.tone}`} aria-labelledby={`quota-${account.id}`}>
     <div className="account-heading"><h3 id={`quota-${account.id}`}>{account.label}</h3><span className="account-state">{state.label}</span></div>
+    {scheduling?.enabled&&scheduling.observationSourceId===account.id&&<SchedulingBadge data={scheduling} networkError={schedulingError}/>}
     {windows.length>0?<div className="quota-meters">{windows.map((window,index)=><WindowMeter key={`${window.limitId}-${window.window}-${index}`} window={window}/>)}</div>:<p className="quota-empty">{account.collectionStatus==='empty'?'En attente du premier relevé.':'Quotas indisponibles.'}</p>}
     <details className="account-details">
       <summary>Voir les détails</summary>
@@ -70,10 +74,13 @@ function AccountPanel({account,networkError}:{account:AccountQuota;networkError:
 }
 export function QuotaCard() {
   const {data,loading,networkError,refresh}=useQuota();
+  const scheduling=useScheduling();
+  const refreshAll=()=>{void refresh();void scheduling.refresh();};
   return <section className="card quota quota-live quota-accounts" aria-labelledby="quota-title">
-    <div className="card-title"><span id="quota-title"><Zap size={18}/>Quotas</span><Button variant="ghost" size="icon-sm" onClick={()=>void refresh()} disabled={loading} aria-label="Actualiser les quotas"><RefreshCw size={14}/></Button></div>
+    <div className="card-title"><span id="quota-title"><Zap size={18}/>Quotas</span><Button variant="ghost" size="icon-sm" onClick={refreshAll} disabled={loading||scheduling.loading} aria-label="Actualiser les quotas et décisions"><RefreshCw size={14}/></Button></div>
     {!data&&!networkError&&<p className="quota-empty">Lecture des relevés…</p>}
     {networkError&&<p className="quota-message"><AlertCircle size={15}/>Lecture indisponible.</p>}
-    <div className="accounts-quota-grid">{data?.accounts.map(account=><AccountPanel key={account.id} account={account} networkError={networkError}/>)}</div>
+    <div className="accounts-quota-grid">{data?.accounts.map(account=><AccountPanel key={account.id} account={account} networkError={networkError} scheduling={scheduling.data} schedulingError={scheduling.networkError}/>)}</div>
+    <SchedulingDialog data={scheduling.data} networkError={scheduling.networkError}/>
   </section>;
 }

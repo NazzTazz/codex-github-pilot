@@ -127,6 +127,25 @@ externe ultérieure. La réserve reste expérimentale et opt-in.
 Les projections CLI/dashboard scheduling et leur recette visuelle restent le lot
 suivant ; les cartes actuelles continuent d'afficher les quotas observés.
 
+`node src/cli.mjs schedule [ID] [--json]` affiche une prévision read-only fondée
+sur le dernier relevé enregistré. Elle ne sonde ni GitHub ni Codex et ne constitue
+jamais une admission : identité et demande sont revalidées au lancement. `status`
+ajoute ce résumé et `metrics` distingue modèle demandé et configuré. Ces commandes
+ouvrent la base en lecture seule, sans migration, et restent utilisables pendant le verrou worker.
+Dans le JSON de `status`, `available` décrit la lecture des jobs historiques ;
+`scheduling.available` décrit séparément la disponibilité du schéma scheduling.
+Les jobs restent donc visibles sur une ancienne base. Un JSON persisté illisible
+ou une valeur de type incorrect dans l'audit produit une erreur filtrée.
+
+Le dashboard expose le même DTO versionné sur `GET /api/scheduling`. Le badge de
+mode apparaît uniquement sur la carte de `scheduling.observationSourceId`; le
+panneau « Voir les décisions » sépare prévisions et admissions historiques. Les
+efforts demandé et configuré y restent distincts, même lorsque le modèle est identique.
+Le badge et le panneau indiquent la source, l'ID et la date avec fuseau du relevé
+utilisé pour la prévision, indépendamment des dates affichées par les jauges. Les
+identités de compte, prompts, chemins, erreurs libres et JSON internes ne sont
+jamais exposés par cette API.
+
 ## Résultats et publication
 
 Par défaut `publish: false` : résultats locaux uniquement. Une publication se

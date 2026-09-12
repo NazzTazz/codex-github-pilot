@@ -34,6 +34,18 @@ Le serveur écoute uniquement sur `127.0.0.1`. Il sert les fichiers compilés du
 dashboard et une projection limitée des données ; ni la base, ni les réponses
 brutes du fournisseur, ni l'identité du compte ne sont exposées.
 
+`GET /api/scheduling` fournit séparément une prévision read-only. Le badge de mode
+est attaché uniquement au compte cible, et le panneau « Voir les décisions »
+présente les candidats et admissions historiques sans exposer les données internes.
+Une panne scheduling ne masque pas les jauges de quota.
+
+Le badge et le dialogue identifient le relevé de la prévision (source, ID et date
+avec fuseau). L'historique affiche modèle et effort demandé/configuré séparément.
+Après compilation, `node scripts/t5-dashboard-fixture.mjs conserve 43175`, depuis
+la racine du dépôt, lance une fixture isolée avec une tentative simulée Sol high
+→ medium. Aucun modèle n'est lancé ; Ctrl+C ferme le serveur et supprime sa base
+temporaire. Les modes `survival`, `reserve`, `unknown` et `disabled` restent disponibles.
+
 ## Organisation
 
 - `src/components/` : navigation et composants d'interface partagés.

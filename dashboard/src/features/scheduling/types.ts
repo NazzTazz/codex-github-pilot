@@ -1,0 +1,16 @@
+export type PublicAssignment={targetId:string|null;provider:string|null;adapter:string|null;observationSourceId:string|null;capacityScopeId:string|null;
+  requestedProfile:string|null;effectiveProfile:string|null;requestedModel:string|null;requestedEffort:string|null;model:string|null;effort:string|null;
+  sandbox:string|null;timeoutMs:number|null;quotaPool:string|null;policyVersion:string|null;policyHash:string|null;mode:string|null;reason:string|null;
+  observationId:number|null;decisionId:number|null;overrideId:number|null};
+export type SchedulingJob={id:number;issue:number;role:string;taskClass:string;status:string;requested:{profile:string|null;model:string|null;effort:string|null};
+  preview:null|{action:string;reasonCode:string;weeklyPhase:string|null;mode:string|null;assignment:PublicAssignment|null};
+  lastDecision:null|{id:number;createdAt:string;kind:string;action:string;reasonCode:string;mode:string|null};
+  override:null|{id:number;state:string;expiresAt:string};deferredSince:string|null;deferredAgeSeconds:number|null};
+export type SchedulingRun={id:number;jobId:number;issue:number;role:string;status:string;jobStartedAt:string;finishedAt:string|null;
+  requestedModel:string;effectiveModel:string;requestedEffort:string;effectiveEffort:string;targetId:string;provider:string|null;quotaPool:string|null;
+  admission:null|{id:number;createdAt:string;action:string;reasonCode:string;mode:string|null}};
+export type SchedulingResponse={version:1;available:boolean;enabled:boolean;serverTime:string;unavailableReason:string|null;projectionKind:'preview';
+  identityVerification:'not-performed';requiresLiveValidation:true;targetId:string;provider:string;observationSourceId:string;capacityScopeId:string;
+  observationId:number|null;observedAt:string|null;quality:string;weeklyPhase:string|null;mode:string|null;recommendedCeiling:string|null;
+  exceptions:string[];blockingReasons:string[];counts:null|{candidateJobs:number;mechanicalReadyJobs:number;deferredJobs:number;deferredPremiumJobs:number};
+  jobs:SchedulingJob[];jobsTotal:number|null;jobsTruncated:boolean;runs:SchedulingRun[];runsTotal:number|null;runsTruncated:boolean};

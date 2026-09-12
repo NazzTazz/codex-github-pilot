@@ -10,13 +10,14 @@ import { poll } from './core.mjs';
 import { execute } from './process.mjs';
 import { checkAuth, createCodexExecutor } from './executors/codex.mjs';
 import { runJob, publishJob, githubToken } from './runner.mjs';
-import { collectObservations, observationDelta } from './observation.mjs';
+import { collectObservations, observationDelta, readExecutionIdentity } from './observation.mjs';
 import { createDashboardServer } from './dashboard.mjs';
 import { schedulingConfig } from './scheduling-config.mjs';
 import { observationConfig } from './observation-config.mjs';
 import { userInfo } from 'node:os';
 import { scheduleNext } from './scheduler.mjs';
 import { recordQuotaIncident } from './quota-incidents.mjs';
+import { readMetricsView,readProjectionIdentity,readSchedulingJob,readSchedulingView,readStatusView } from './scheduling-view.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 export async function loadConfig(file) {
@@ -72,12 +73,30 @@ async function main() {
   const command = args[0] || 'help';
   if (command === 'help') {
     console.log('Scheduling: schedule override ID --reason "..." | schedule clear-override ID (local worker lock required).');
-    console.log('node src/cli.mjs <doctor|setup|status|metrics|observe|usage|stop-observe|dashboard|stop-dashboard|poll|run|stop|publish ID|retry ID|cancel ID|resume-quota> [--config path] [--once]\nmetrics --json exports worker telemetry. observe collects account quota/tokens once; --watch --interval 60 repeats. usage [--json] [--limit 100] reads saved account observations. stop-observe stops that observer. dashboard [--port 4173] serves the local dashboard; stop-dashboard stops only the dashboard. Default config: config.local.json. poll only queues; run executes.'); return;
+    console.log('node src/cli.mjs <doctor|setup|status|metrics|schedule [ID]|observe|usage|stop-observe|dashboard|stop-dashboard|poll|run|stop|publish ID|retry ID|cancel ID|resume-quota> [--config path] [--json] [--once]\nmetrics --json exports worker telemetry. schedule previews recorded scheduling facts without admission. observe collects account quota/tokens once; --watch --interval 60 repeats. usage [--json] [--limit 100] reads saved account observations. stop-observe stops that observer. dashboard [--port 4173] serves the local dashboard; stop-dashboard stops only the dashboard. Default config: config.local.json. poll only queues; run executes.'); return;
   }
   const configIndex = args.indexOf('--config');
   const config = await loadConfig(path.resolve(configIndex >= 0 ? args[configIndex+1] : path.join(root,'config.local.json')));
+  const json=args.includes('--json');
+  const operands=args.slice(1).filter((value,index,list)=>value!=='--json'&&value!=='--config'&&list[index-1]!=='--config');
+  if(command==='schedule'&&!['override','clear-override'].includes(operands[0])) {
+    if(operands.length>1||operands.length===1&&!/^[1-9]\d*$/.test(operands[0]))throw new Error('Usage: schedule [positive ID] [--json]');
+    const payload=operands.length?readSchedulingJob(config.stateDirectory,config,Number(operands[0])):readSchedulingView(config.stateDirectory,config);
+    if(json)console.log(JSON.stringify(payload));else printSchedule(payload);return;
+  }
+  if(command==='status') {
+    if(operands.length)throw new Error('Usage: status [--json]');const payload=readStatusView(config.stateDirectory,config);
+    if(json)console.log(JSON.stringify(payload));else {console.log(`Scheduling: ${payload.scheduling.enabled?'enabled':'disabled'}; available=${payload.scheduling.available}; mode=${payload.scheduling.mode??'unknown'}`);
+      console.log('Preview from saved observations; GitHub request and execution identity are revalidated before launch.');console.table(payload.jobs);}return;
+  }
+  if(command==='metrics') {
+    if(operands.length)throw new Error('Usage: metrics [--json]');const rows=readMetricsView(config.stateDirectory);
+    if(json)console.log(JSON.stringify(rows,null,2));else console.table(rows.map(r=>({run:r.id,job:r.job_id,role:r.role,status:r.run_status,
+      requested:r.model_requested,configured:r.model_effective??r.model_requested,requested_effort:r.effort_requested??r.reasoning_effort,
+      effective_effort:r.reasoning_effort,provider:r.provider,target:r.target_id,decision:r.scheduling_decision_id,input:r.input_tokens,
+      cached:r.cached_input_tokens,output:r.output_tokens,reasoning:r.reasoning_output_tokens,preparation_ms:r.preparation_ms,worker_ms:r.worker_ms,total_ms:r.total_ms})));return;
+  }
   if(command==='dashboard' || command==='stop-dashboard') {
-    await mkdir(config.stateDirectory,{recursive:true});
     const stopFile=path.join(config.stateDirectory,'dashboard-stop.requested');
     if(command==='stop-dashboard') {await writeFile(stopFile,new Date().toISOString());console.log('Dashboard stop requested. Observer and pilot are unchanged.');return;}
     const index=args.indexOf('--port'),port=index<0?4173:Number(args[index+1]);
@@ -85,7 +104,7 @@ async function main() {
     const assets=path.join(root,'dashboard','dist');
     if(!existsSync(path.join(assets,'index.html')))throw new Error('Build the dashboard first: npm run dashboard:build');
     const release=await lock(path.join(config.stateDirectory,'dashboard'));
-    const server=createDashboardServer({stateDirectory:config.stateDirectory,assetDirectory:assets,observation:config.observation});
+    const server=createDashboardServer({stateDirectory:config.stateDirectory,assetDirectory:assets,observation:config.observation,scheduling:config.scheduling,config});
     let timer;
     const stop=()=>{clearInterval(timer);server.close();server.closeIdleConnections();};
     try {
@@ -108,12 +127,18 @@ async function main() {
   }
   if (command === 'doctor') {
     const version = await execute(config.codexCommand[0],[...config.codexCommand.slice(1),'--version']);
-    console.log(version.stdout.trim());
     await checkAuth(config);
-    console.log('ChatGPT authentication confirmed; no API key fallback.');
+    const actualIdentity=await readExecutionIdentity(config),recorded=readProjectionIdentity(config.stateDirectory,config);
     const repo = await github.request('');
-    console.log(`GitHub read access: ${repo.full_name}; authenticated: ${!!github.token}; publication: ${config.publish}`);
-    console.log(`Checkout: ${config.checkout}\nState: ${config.stateDirectory}`); return;
+    const diagnostic={version:1,serverTime:new Date().toISOString(),codex:{version:version.stdout.trim(),authenticated:true},
+      github:{repository:repo.full_name,authenticated:!!github.token,publication:config.publish},scheduling:{enabled:config.scheduling.enabled,
+        observationSourceId:config.scheduling.enabled?config.scheduling.observationSourceId:'local',observationId:recorded.observationId,
+        quality:recorded.quality,identityMatches:actualIdentity&&recorded.accountKey?actualIdentity===recorded.accountKey:null,
+        catalogueObservedAt:recorded.catalogueObservedAt}};
+    if(json)console.log(JSON.stringify(diagnostic));else {console.log(version.stdout.trim());console.log('ChatGPT authentication confirmed; no API key fallback.');
+      console.log(`Execution identity matches saved observation: ${diagnostic.scheduling.identityMatches??'unknown'}`);
+      console.log(`GitHub read access: ${repo.full_name}; authenticated: ${!!github.token}; publication: ${config.publish}`);
+      console.log(`Checkout: ${config.checkout}\nState: ${config.stateDirectory}`);}return;
   }
   await mkdir(config.stateDirectory,{recursive:true});
   const stopFile = path.join(config.stateDirectory,'stop.requested');
@@ -164,17 +189,6 @@ async function main() {
       } while(!stopping);
     } finally {process.off('SIGINT',stop);process.off('SIGTERM',stop);store.close();if(release)await release();}
     return;
-  }
-  if(command==='metrics') {
-    const rows=store.metrics();
-    if(args.includes('--json'))console.log(JSON.stringify(rows,null,2));
-    else console.table(rows.map(r=>({run:r.id,job:r.job_id,role:r.role,status:r.run_status,input:r.input_tokens,cached:r.cached_input_tokens,
-      output:r.output_tokens,reasoning:r.reasoning_output_tokens,preparation_ms:r.preparation_ms,worker_ms:r.worker_ms,total_ms:r.total_ms})));
-    store.close();return;
-  }
-  if (command === 'status') {
-    console.log(`Quota paused: ${store.get('quotaPaused') === 'yes'}`);
-    console.table(store.jobs().map(({id,issue,role,status,sha,error})=>({id,issue,role,status,sha,error}))); store.close(); return;
   }
   const release = await lock(config.stateDirectory);
   let stopping = false;
@@ -244,6 +258,16 @@ async function main() {
       }
     } while (!stopping);
   } finally { store.close(); await release(); }
+}
+function printSchedule(payload) {
+  console.log('Preview from saved observations. Execution identity and GitHub request will be revalidated before launch.');
+  if(Object.hasOwn(payload,'job')) {console.log(`Scheduling available: ${payload.available}`);if(payload.job)console.table([payload.job]);return;}
+  console.log(`Target: ${payload.targetId} / source ${payload.observationSourceId}; available=${payload.available}; enabled=${payload.enabled}`);
+  console.log(`Observation: ${payload.quality}; mode=${payload.mode??'unknown'}; economic ceiling=${payload.recommendedCeiling??'none'}`);
+  if(payload.counts)console.log(`Candidates=${payload.counts.candidateJobs}; deferred=${payload.counts.deferredJobs}; mechanical-ready=${payload.counts.mechanicalReadyJobs}`);
+  if(payload.blockingReasons?.length)console.log(`Blocking: ${payload.blockingReasons.join(', ')}`);
+  console.table(payload.jobs?.map(job=>({id:job.id,issue:job.issue,role:job.role,status:job.status,requested:job.requested.profile,
+    action:job.preview?.action??null,planned:job.preview?.assignment?.effectiveProfile??null,reason:job.preview?.reasonCode??null,age_seconds:job.deferredAgeSeconds}))??[]);
 }
 function printObservation(sample,source=null) {
   console.log(`Account ${source?.label??sample.observation_source_id??'Codex'} [${sample.observation_source_id??'local'}] observation #${sample.id} ${sample.finished_at}: ${sample.status}; plan=${sample.plan_type ?? 'unknown'}`);

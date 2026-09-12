@@ -1,5 +1,9 @@
 # Pilot quota-aware — révision après comparaison OpenHands / ACP
 
+Lot final CLI/API/dashboard après T4 : [TRANCHE-5-SPEC.md](TRANCHE-5-SPEC.md), base `074a03d`. Il précise la projection read-only hypothétique, le DTO public, les compatibilités legacy et la recette ; implémentation Sol high, contre-recette Astra high. Aucun changement des règles d'admission ni extension au double worker.
+
+Suite immédiate après recette T5 : [TRANCHE-6-SPEC.md](TRANCHE-6-SPEC.md), métadonnées GitHub repliées, notice utilisateur et préparation d'un premier essai sur **waar-micro-combat**. Le branchement réel reste une opération explicite avec l'utilisateur, pas une autorisation donnée au rédacteur/implémenteur.
+
 Révision 2 — 11 septembre 2026. Destinataires : Sol et les mainteneurs.
 
 Amendement normatif du 12 septembre 2026 après T2.5 : les sections 10.3, 10.4, 10.8 et 10.9 ci-dessous intègrent l'observation multi-compte livrée et la vue compacte demandée. Les mentions de périmètre mono-compte désignent désormais une seule cible d'exécution, pas une seule source observée. La section 10.11 fixe les contrôles supplémentaires avant livraison de T3/T4. Ne pas réimplémenter T2.5.

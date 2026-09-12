@@ -6,6 +6,7 @@ import path from 'node:path';
 import { request } from 'node:http';
 import { Store } from '../src/store.mjs';
 import { createDashboardServer, readQuota } from '../src/dashboard.mjs';
+import { schedulingConfig } from '../src/scheduling-config.mjs';
 
 function fixture(t) {
   const directory=mkdtempSync(path.join(os.tmpdir(),'pilot-dashboard-'));
@@ -32,6 +33,7 @@ test('quota API projection preserves exact values and strips account identity an
   assert.equal(payload.quota.windows[0].remainingPercent,12);
   assert.equal(payload.quota.windows[0].windowMinutes,10080);
   assert.equal(payload.usage.lifetimeTokens,539552906);assert.equal(payload.quota.stale,false);
+  assert.equal(payload.observationId,1);
   const serialized=JSON.stringify(payload);
   for(const secret of ['secret-account-id','private-fingerprint','not-for-browser','"raw"'])assert.equal(serialized.includes(secret),false);
 });
@@ -54,7 +56,7 @@ test('HTTP dashboard serves built assets and refreshed SQLite data, rejecting ex
   let response=await fetch(url);assert.equal(response.status,200);assert.match(await response.text(),/Pilot local/);
   assert.match(response.headers.get('content-security-policy'),/connect-src 'self'/);
   response=await fetch(url+'/api/quota');assert.equal(response.status,200);assert.equal(response.headers.get('cache-control'),'no-store');
-  assert.equal((await response.json()).quota.windows[0].remainingPercent,12);
+  const legacy=await response.json();assert.equal(legacy.quota.windows[0].remainingPercent,12);assert.equal(legacy.observationId,1);
   save(directory,{usage:{lifetime_tokens:539552999,peak_daily_tokens:null,daily_buckets:[]}});
   assert.equal((await (await fetch(url+'/api/quota')).json()).usage.lifetimeTokens,539552999);
   assert.equal((await fetch(url+'/api/quota',{headers:{Origin:'https://untrusted.example'}})).status,403);
@@ -74,4 +76,14 @@ test('HTTP dashboard serves built assets and refreshed SQLite data, rejecting ex
   }
   assert.equal((await fetch(url+'/assets/app.js')).status,200);
   assert.equal((await fetch(url+'/api/unknown')).status,404);
+});
+test('HTTP scheduling is read-only, versioned, HEAD-compatible and filters identity',async t=>{
+  const {directory,assets}=fixture(t);save(directory,{capabilities:{account_key:'private-fingerprint',observed_at:'2026-09-11T10:00:01Z',models:[{slug:'gpt-5.6-sol',efforts:['medium']}]}});
+  const observation={mode:'legacy',defaultAccountId:'local',accounts:[{id:'local',label:'Codex',codexHome:null,scopeId:'local-codex-account'}]};
+  const scheduling=schedulingConfig({enabled:true},observation),config={timeoutMinutes:30,observation,scheduling};
+  const server=createDashboardServer({stateDirectory:directory,assetDirectory:assets,observation,scheduling,config,now:()=>Date.parse('2026-09-11T10:01:00Z')});
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>{server.close(resolve);server.closeAllConnections();}));
+  const url=`http://127.0.0.1:${server.address().port}/api/scheduling`;let response=await fetch(url);assert.equal(response.status,200);
+  const payload=await response.json();assert.equal(payload.version,1);assert.equal(payload.projectionKind,'preview');assert.equal(JSON.stringify(payload).includes('private-fingerprint'),false);
+  response=await fetch(url,{method:'HEAD'});assert.equal(response.status,200);assert.equal(await response.text(),'');assert.equal((await fetch(url,{method:'POST'})).status,405);
 });

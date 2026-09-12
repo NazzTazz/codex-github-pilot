@@ -395,3 +395,114 @@ Preuves réexécutées : tests de contre-recette **9/9**, suite complète **106/
 Vérification supplémentaire indépendante en copie temporaire : retrait du traitement 404/410 → régression du commentaire supprimé rouge ; rétablissement → verte. Remplacement de la condition d'ouverture sur preuve observée par l'ancienne condition sur capacité liée à l'identité → régression spend-control rouge ; rétablissement → verte. La baseline corrigée passe les deux scénarios. Le script ponctuel et toutes ses copies temporaires ont été supprimés ; aucun code applicatif ou test livré modifié pendant cette passe.
 
 Cette vérification ciblée complète la contre-recette précédente, sans prétendre constituer un nouvel audit exhaustif. Aucun worker, modèle, GitHub réel ou compte personnel utilisé. Seul ce journal est complété ; aucune opération de commit/push.
+
+## Spécification T5 — CLI/API/dashboard — 12 septembre 2026
+
+T4 a été commitée et poussée dans `074a03d` sur `feat/quota-aware-foundations`. À la demande de l'utilisateur, `TRANCHE-5-SPEC.md` définit le dernier lot V1 pour Sol high, avec contre-recette Astra high en contexte neuf. La spec générale référence ce document.
+
+Décisions précisées : lecteur SQLite distinct du Store qui migre, prévision sans sonde réseau explicitement hypothétique et sans pouvoir d'admission, whitelist publique récursive distincte de l'audit interne, compteurs avant troncature, tentatives jointes à leur vraie admission historique, ajout observationId explicitement compatible à l'API quota legacy, diagnostic doctor read-only, panneau scheduling replié et badge uniquement sur la carte cible. Les cartes existantes, le mono-worker et les corrections P1 restent des invariants.
+
+Le document inclut les contrats CLI/HTTP, états d'indisponibilité, plan de tests/mutations, recette visuelle sur fixtures, règle d'escalade et arrêt sans commit avant contre-recette. Seuls les documents sont modifiés ; aucune implémentation T5, génération, manipulation de compte/service ou exécution de suite applicative. Vérification documentaire et `git diff --check` uniquement. Documents non commités.
+
+## Livraison Sol - T5 CLI/API/dashboard - 12 septembre 2026
+
+La tranche 5 expose désormais une projection de scheduling locale, versionnée et strictement en lecture seule. `src/scheduling-view.mjs` ouvre SQLite avec `readOnly: true`, vérifie le schéma sans migration, réalise chaque projection dans un snapshot explicite et partage le même DTO public entre `pilot schedule --json` et `GET /api/scheduling`.
+
+La projection conserve l'identité de l'observation sélectionnée sans exposer de clé de compte, de prompt, de chemin local, d'erreur brute ni de prose d'override. Les totaux sont calculés avant la limite de 100 jobs, les 20 exécutions les plus récentes restent reliées à leur admission persistée, et la prévisualisation annonce explicitement qu'elle est hypothétique et non réservante.
+
+Les commandes `schedule`, `status` et `metrics` passent avant toute création de répertoire, ouverture du Store mutable ou acquisition du verrou worker. `doctor` rapporte la configuration, l'identité réelle et l'identité enregistrée sans fuite de secret. Les commandes mutantes d'override restent sous le chemin verrouillé existant.
+
+Le dashboard ajoute `observationId` à `/api/quota`, expose `/api/scheduling` avec les protections HTTP existantes et affiche le badge uniquement sur le compte réellement sélectionné. Le dialogue compact « Voir les décisions » couvre les modes conservation, survie, réserve, inconnu et désactivé sans modifier la carte quota historique.
+
+Recette exécutée :
+
+- `npm test` : 115 tests réussis sur 115 ;
+- trois contre-mutations isolées détectées : comptage après limite, substitution du compte par défaut, fuite de l'assignment interne ;
+- `npm run dashboard:build` : build Vite réussi ;
+- vérifications syntaxiques Node : réussies ;
+- `git diff --check` : réussi, hors avertissements de normalisation LF/CRLF ;
+- recette navigateur locale sur les modes `conserve`, `survival`, `reserve`, `unknown` et `disabled`, avec ouverture/fermeture clavier du dialogue et contrôle mobile à 390 px.
+
+Les captures sont conservées dans `artifacts/t5-visual/`. La fixture reproductible est `scripts/t5-dashboard-fixture.mjs` ; elle est placée hors de `test/` afin de ne pas être découverte comme test par `node --test`. Aucun service personnel, appel modèle ou appel GitHub n'a été utilisé. Aucun commit ni push n'a été effectué.
+
+## Spécification de la suite immédiate T6 — 12 septembre 2026
+
+À la demande de l'utilisateur, `TRANCHE-6-SPEC.md` place après livraison/recette de T5 un lot distinct : enveloppe details/summary canonique pour replier le JSON pilot-task, compatibilité du fence nu et revalidation stricte ; notice utilisateur de branchement sur dépôt existant ; checklist de première utilisation sur **waar-micro-combat**, nom confirmé le plus récemment. La spec générale référence T6.
+
+Le lot ne comprend aucun branchement réel, publication GitHub ou consommation de quota. Propriétaire, chemin et validation métier du dépôt pilote restent à confirmer avec l'utilisateur. Les changements T5 présents ont été préservés ; seuls ces documents ont été ajoutés/complétés. Aucun test applicatif exécuté pour la rédaction ; `git diff --check` effectué. Pas de commit/push.
+
+## Contre-recette indépendante T5 — 12 septembre 2026
+
+Verdict : **changes_requested**, six écarts P2 à traiter. Base inspectée : `074a03d`, changements T5 non commités. Contrat : `TRANCHE-5-SPEC.md` et sections applicables de la spec générale. La rédaction T6 apparue pendant cette passe a été préservée et n'est pas recettée ici. Aucun correctif applicatif T5 effectué.
+
+### 1. P2 — Le filtre public accepte des objets arbitraires à la place de scalaires
+
+Localisation : `src/scheduling-view.mjs:58`, particulièrement ligne 62. `publicAssignment` filtre les noms de clés mais recopie leurs valeurs sans validation de type ni filtrage récursif. Dans une décision persistée malformée, remplacer assignment.model par `{accountKey:"NESTED_PRIVATE_CANARY",raw:{prompt:"NESTED_PROMPT_CANARY"}}` fait ressortir les deux canaris dans `GET /api/scheduling`, statut 200. La reproduction passe par une vraie admission sauvegardée, un worker_run local simulé et le serveur HTTP réel sur un port temporaire.
+
+La démonstration suppose une valeur persistée de forme incorrecte ; aucune fuite n'est démontrée sur les assignments valides produits par T4. Elle contredit néanmoins la whitelist récursive et la recette des canaris imbriqués imposées en sections 4/8. Correction minimale : projeter des scalaires typés, refuser les objets/tableaux inattendus et appliquer la même validation aux autres valeurs issues de decision_json. Une erreur filtrée est préférable à la transmission de données internes.
+
+### 2. P2 — status masque les jobs d'une base sans schéma scheduling
+
+Localisation : `src/scheduling-view.mjs:133–135`. Le lecteur générique refuse tout le schéma avant de rendre les lignes historiques de status. Sur une base contenant un job et dépourvue de scheduling_decisions, la projection annonce bien scheduling.available=false mais retourne jobs=[] : un job persisté, zéro affiché. Le témoin confirme que la base n'a pas été modifiée.
+
+Correction minimale : lire les colonnes historiques de jobs indépendamment de la disponibilité du schéma scheduling, dans une transaction read-only. Conserver l'indisponibilité du résumé sans fabriquer une file vide. Cela rétablit le contrat de compatibilité de status, sans migration de consultation.
+
+### 3. P2 — Une métadonnée JSON illisible produit une prévision exécutable
+
+Localisation : `src/scheduling-view.mjs:100`, passage des candidats à schedulingDecision sans validation préalable du JSON persisté. Mettre task_metadata_json à `{broken` sur un job routine produit available=true et preview.action=execute. Le catch permissif de requirementsFor est utile ailleurs mais ne satisfait pas le contrat T5 d'indisponibilité explicite pour JSON illisible.
+
+Correction minimale : vérifier les JSON nécessaires à la projection sur la voie de lecture T5 ; signaler proprement la corruption (503 filtrée côté HTTP, erreur CLI) sans changer les règles d'admission T4 ni assimiler ce cas à un quota absent.
+
+### 4. P2 — L'historique visuel cache une dégradation d'effort
+
+Localisation : `dashboard/src/features/scheduling/SchedulingPanel.tsx:37`. Une tentative enregistrée demandée en Sol high et configurée en Sol medium est rendue comme `gpt-5.6-sol → gpt-5.6-sol`. Les champs requestedEffort/effectiveEffort existent dans le DTO mais ne sont jamais affichés. Reproduit dans le Chrome connecté par l'utilisateur, avec une tentative simulée ajoutée exclusivement à la base temporaire de recette ; aucun executor appelé.
+
+Correction minimale : montrer modèle et effort des deux côtés, ou les profils équivalents. La date de fin et le mode Conservation actuellement affichés ne permettent pas de connaître l'effort réellement configuré.
+
+### 5. P2 — La prévision affichée n'identifie pas son relevé
+
+Localisation : `dashboard/src/features/scheduling/SchedulingPanel.tsx:16–27`. Ni badge ni dialogue n'affichent observationId/observedAt/serverTime de la projection. Les dates visibles dans la carte sont celles des quotas/reset, et celles du dialogue concernent seulement les tentatives. Deux lectures indépendantes quota/scheduling peuvent donc être affichées ensemble sans moyen de distinguer leurs relevés, contrairement à la section 6 de T5.
+
+Correction minimale : afficher au moins la date avec fuseau du relevé utilisé par scheduling, séparément des dates de quota ; indiquer clairement la provenance ou un décalage d'ID lorsque pertinent. Aucun recalcul de policy dans React n'est nécessaire.
+
+### 6. P2 — La fixture livrée ne démarre pas depuis scripts/
+
+Localisation : `scripts/t5-dashboard-fixture.mjs:7` et `:9`. `node scripts/t5-dashboard-fixture.mjs conserve 43179` échoue immédiatement avec ERR_MODULE_NOT_FOUND : l'import ../../src/scheduling-config.mjs vise le parent du dépôt. Le root calculé avec ../../ pointe également au mauvais endroit pour dashboard/dist.
+
+Correction minimale : adapter les deux chemins au déplacement du fichier dans scripts/ et rejouer réellement la commande documentée. Pour poursuivre cette contre-recette, seule une copie jetable dans review/ a reçu ces deux corrections de chemin ; le script livré est resté inchangé.
+
+### Preuves exécutées et limites
+
+- Suite livrée : **115/115 réussis**, y compris les trois mutations T5 et les régressions/mutations T4.
+- `node --test review/t5-counter-acceptance.mjs` : **1 témoin vert, 3 régressions rouges** (écarts backend 1–3). Le témoin compare schéma et toutes les lignes métier avant/après les lectures schedule/status/metrics et vérifie qu'une admission premium reste premium après passage du quota courant en survival. Modèle observé absent toujours null. Le fichier de sondes reste disponible, hors découverte automatique de npm test.
+- `npm run dashboard:build` : réussi ; `node --check` sur les huit modules/tests/scripts concernés : réussi ; `git diff --check` : réussi, avertissements LF/CRLF seulement. Le contrôle syntaxique ne détecte pas l'import cassé de la fixture ; son exécution l'a révélé.
+- Chrome fourni par l'utilisateur, onglet de recette dédié via extension : conservation, survie, réserve, inconnu et routage désactivé examinés. Badge unique sur Pro Lite, jauges simultanées, détails initialement repliés, dialogue ouvert/fermé au clavier, largeur de page sans débordement à 1440 et 390 px. Le mode désactivé ne marque pas Plus comme cible ; son motif est encore le code brut policy-disabled dans les lignes.
+- Panne de /api/scheduling simulée par blocage réseau limité à l'onglet temporaire : trois jauges conservées, message « Données conservées, actualisation indisponible. » affiché. Blocage réseau retiré ensuite. Les captures du dialogue et de la tentative dégradée sont visibles dans l'échange de contre-recette ; les captures Sol de artifacts/t5-visual/ sont préservées.
+
+L'onglet créé a été fermé et l'override de viewport supprimé. Les cinq processus de fixture (ports 43179–43183), leurs bases temporaires et la copie visuelle ont été supprimés ; absence de listeners sur ces ports vérifiée. Aucun onglet personnel, dashboard/observateur personnel, compte, credential, config.local.json ou état opérationnel manipulé. Aucun appel GitHub/modèle réel, commit ou push. Seuls ce journal et la sonde indépendante sont ajoutés/modifiés par cette passe. Ce verdict n'est pas une validation exhaustive de doctor ou de tous les états de panne UI.
+
+## Corrections des six écarts T5 — 12 septembre 2026
+
+Corrections réalisées à la demande explicite de l'utilisateur. Les sondes de contre-recette ont été rejouées avant modification applicative : **1 témoin vert, 3 régressions backend rouges**. Elles sont maintenant dans `test/t5-counter-acceptance.test.mjs` et exécutées par `npm test`.
+
+1. `src/scheduling-view.mjs` valide les objets JSON et les types des scalaires publics d'assignment, des phases/modes persistés et de la preuve avant spawn. Un objet/tableau inattendu ne traverse plus le DTO. Les erreurs de parsing/type ont un message fermé, sans extrait de JSON : HTTP 503 filtrée et CLI en échec sans fuite des canaris. Les propriétés internes non autorisées restent exclues.
+2. Le snapshot read-only englobe désormais aussi la vérification du schéma. `status` lit les colonnes historiques des jobs même lorsque le schéma scheduling manque ; `available` décrit cette lecture et `scheduling.available` reste indépendant. Aucun fichier, table ou ligne métier n'est créé/modifié par la consultation.
+3. Les candidats et le détail d'un job valident task_metadata_json avant toute prévision. Le JSON illisible produit une erreur explicite plutôt qu'un faux execute. Les règles d'admission et requirementsFor de T4 restent inchangés.
+4. `SchedulingPanel.tsx` affiche modèle **et effort** demandé/configuré pour chaque tentative. La dégradation Sol high → Sol medium est lisible même avec un modèle identique.
+5. Badge et dialogue partagent une référence au relevé de prévision : source, ID et date avec fuseau, distincte des dates des jauges. Les dates absentes ou invalides restent inconnues. La présentation conserve le badge sur la seule carte cible.
+6. Les chemins d'import et de racine de `scripts/t5-dashboard-fixture.mjs` sont corrigés. Le mode conserve inclut maintenant une admission historique simulée high → medium, sans appel executor. La fixture accepte un port éphémère pour les tests et un arrêt IPC permettant la vérification de son nettoyage. Le lancement depuis un autre répertoire, le service des assets compilés et le contenu historique de l'API sont testés.
+
+README et documentation dashboard complétés pour les états de disponibilité, les erreurs filtrées, les efforts/provenance visibles et la commande de fixture.
+
+Validation exécutée :
+
+- Régressions ciblées enrichies : **7/7 réussies** (lecture seule/historique, compatibilité status y compris CLI, corruption metadata, canaris HTTP, types imbriqués/diagnostics CLI, erreurs HTTP de corruption, lancement/nettoyage réel de fixture).
+- Suite finale `npm test` : **122/122 réussis**, mutations T4/T5 comprises. La première suite avait donné 121/122 à cause d'un EACCES sur le port du test historique de verrou OS ; ce test est passé en relance ciblée puis dans la suite complète finale, sans modification de son code ni des réglages système.
+- `npm run dashboard:build` : réussi (TypeScript/Vite) ; `node --check` des trois modules/tests JS corrigés et `git diff --check` : réussis, avertissements LF/CRLF habituels.
+- Chrome connecté par l'utilisateur, fixture corrigée lancée directement depuis scripts/ : badge avec « Relevé de la prévision #2 : 12/09 20:00 UTC+2 · source lite », historique avec « Demandé : gpt-5.6-sol · high » et « Configuré : gpt-5.6-sol · medium ». Inspection desktop 1440 px et mobile 390 px ; dialogue/page sans débordement horizontal, contenu lisible. Capture mobile visible dans cet échange.
+
+Les six écarts de cette contre-recette sont corrigés dans leur périmètre. Fixture manuelle et base temporaire nettoyées, port 43179 libéré, onglet de validation fermé et viewport rétabli. Aucun service personnel, compte, credential, config.local.json ou état opérationnel utilisé ; aucune génération ou requête GitHub réelle. T6 préservée sans implémentation. Base toujours `074a03d`, changements non commités, aucun push.
+
+## Livraison Git T5 — 12 septembre 2026
+
+Commit et push demandés explicitement par l'utilisateur après correction. Branche retenue : `feat/quota-aware-foundations`, qui porte déjà T4 ; synchronisation avec origin vérifiée avant livraison, sans divergence. Le lot comprend T5, les six corrections et leurs tests, la fixture et les captures de recette, ainsi que la documentation T5/T6 déjà préparée. T6 reste une spécification sans implémentation. Validation de référence : suite finale 122/122, build dashboard et contre-recette Chrome réussis ci-dessus. Aucun fichier de configuration personnelle ni état opérationnel inclus.

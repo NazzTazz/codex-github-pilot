@@ -3,6 +3,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { existsSync, createReadStream } from 'node:fs';
 import { realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { readSchedulingView } from './scheduling-view.mjs';
+import { schedulingConfig } from './scheduling-config.mjs';
 
 const staleAfterMs=180000;
 const safeNumber=value=>Number.isSafeInteger(value) && value>=0?value:null;
@@ -38,7 +40,7 @@ export function quotaPayload(row, now=Date.now()) {
 
 export function readQuota(stateDirectory, now=Date.now()) {
   const account=readAccountsQuota(stateDirectory,undefined,now).accounts[0];
-  const {id,label,planType,identityStatus,sharedQuotaWith,observationId,...payload}=account;
+  const {id,label,planType,identityStatus,sharedQuotaWith,...payload}=account;
   return payload;
 }
 
@@ -71,7 +73,8 @@ export function readAccountsQuota(stateDirectory,observation=legacyObservation()
   } finally { db.close(); }
 }
 
-export function createDashboardServer({stateDirectory,assetDirectory,observation=legacyObservation(),now=Date.now}) {
+export function createDashboardServer({stateDirectory,assetDirectory,observation=legacyObservation(),scheduling=schedulingConfig(),config=null,now=Date.now}) {
+  const schedulingContext=config??{scheduling,observation,timeoutMinutes:30};
   const mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8',
     '.svg':'image/svg+xml','.png':'image/png','.ico':'image/x-icon','.woff2':'font/woff2'};
   const server=createServer(async(req,res)=>{
@@ -94,12 +97,17 @@ export function createDashboardServer({stateDirectory,assetDirectory,observation
       if(url.pathname==='/api/quota') {
         const all=readAccountsQuota(stateDirectory,observation,now());
         const selected=all.accounts.find(account=>account.id===all.defaultAccountId)??all.accounts[0];
-        const {id,label,planType,identityStatus,sharedQuotaWith,observationId,...payload}=selected;
+        const {id,label,planType,identityStatus,sharedQuotaWith,...payload}=selected;
         send(200,req.method==='HEAD'?'':JSON.stringify(payload));return;
       }
       if(url.pathname==='/api/accounts/quota') {
         const payload=readAccountsQuota(stateDirectory,observation,now());
         send(200,req.method==='HEAD'?'':JSON.stringify(payload));return;
+      }
+      if(url.pathname==='/api/scheduling') {
+        try {const payload=readSchedulingView(stateDirectory,schedulingContext,new Date(now()));send(200,req.method==='HEAD'?'':JSON.stringify(payload));}
+        catch {send(503,req.method==='HEAD'?'':JSON.stringify({error:'scheduling-unavailable'}));}
+        return;
       }
       if(url.pathname.startsWith('/api/')) {send(404,JSON.stringify({error:'Not found'}));return;}
       const pathname=decodeURIComponent(url.pathname);
